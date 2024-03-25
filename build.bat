@@ -23,9 +23,14 @@ python hyperbole.py build -r
 
 echo 开始运行
 cd .\build\
-hysteria-windows-amd64.exe server -c server.yaml
+hysteria-windows-amd64.exe panel -c server.yaml -l debug
 
+echo. -----------------------------------by ohxing-----------------------------------
+exit
 
 :b
 echo 开始编译
 python hyperbole.py build -r
+
+echo. -----------------------------------by ohxing-----------------------------------
+exit

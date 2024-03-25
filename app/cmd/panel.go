@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -31,20 +32,24 @@ import (
 )
 
 const (
-	defaultListenAddr = ":443"
+	defaultListenAdd = ":443"
+	v2board_uri_user = "/api/v1/server/UniProxy/user"
+	v2board_uri_push = "/api/v1/server/UniProxy/push"
+	v2board_uri_conf = "/api/v1/server/UniProxy/config"
 )
 
-var serverCmd = &cobra.Command{
-	Use:   "server",
-	Short: "Server mode",
-	Run:   runServer,
+var serveCmd = &cobra.Command{
+	Use:   "panel",
+	Short: "Panel mode",
+	Run:   runServe,
 }
 
 func init() {
-	rootCmd.AddCommand(serverCmd)
+	rootCmd.AddCommand(serveCmd)
 }
 
-type serverConfig struct {
+type serveConfig struct {
+	V2board               *v2boardConfig              `mapstructure:"v2board"`
 	Listen                string                      `mapstructure:"listen"`
 	Obfs                  serverConfigObfs            `mapstructure:"obfs"`
 	TLS                   *serverConfigTLS            `mapstructure:"tls"`
@@ -52,7 +57,6 @@ type serverConfig struct {
 	QUIC                  serverConfigQUIC            `mapstructure:"quic"`
 	Bandwidth             serverConfigBandwidth       `mapstructure:"bandwidth"`
 	IgnoreClientBandwidth bool                        `mapstructure:"ignoreClientBandwidth"`
-	SpeedTest             bool                        `mapstructure:"speedTest"`
 	DisableUDP            bool                        `mapstructure:"disableUDP"`
 	UDPIdleTimeout        time.Duration               `mapstructure:"udpIdleTimeout"`
 	Auth                  serverConfigAuth            `mapstructure:"auth"`
@@ -63,159 +67,23 @@ type serverConfig struct {
 	Masquerade            serverConfigMasquerade      `mapstructure:"masquerade"`
 }
 
-type serverConfigObfsSalamander struct {
-	Password string `mapstructure:"password"`
+type v2boardConfig struct {
+	ApiHost string `mapstructure:"apiHost"`
+	ApiKey  string `mapstructure:"apiKey"`
+	NodeID  uint   `mapstructure:"nodeID"`
 }
 
-type serverConfigObfs struct {
-	Type       string                     `mapstructure:"type"`
-	Salamander serverConfigObfsSalamander `mapstructure:"salamander"`
+type PanelConfig struct {
+	Type    string `mapstructure:"type"`
+	ApiHost string `mapstructure:"apiHost"`
+	ApiKey  string `mapstructure:"apiKey"`
+	NodeID  uint   `mapstructure:"nodeID"`
 }
 
-type serverConfigTLS struct {
-	Cert string `mapstructure:"cert"`
-	Key  string `mapstructure:"key"`
-}
-
-type serverConfigACME struct {
-	Domains        []string `mapstructure:"domains"`
-	Email          string   `mapstructure:"email"`
-	CA             string   `mapstructure:"ca"`
-	DisableHTTP    bool     `mapstructure:"disableHTTP"`
-	DisableTLSALPN bool     `mapstructure:"disableTLSALPN"`
-	AltHTTPPort    int      `mapstructure:"altHTTPPort"`
-	AltTLSALPNPort int      `mapstructure:"altTLSALPNPort"`
-	Dir            string   `mapstructure:"dir"`
-}
-
-type serverConfigQUIC struct {
-	InitStreamReceiveWindow     uint64        `mapstructure:"initStreamReceiveWindow"`
-	MaxStreamReceiveWindow      uint64        `mapstructure:"maxStreamReceiveWindow"`
-	InitConnectionReceiveWindow uint64        `mapstructure:"initConnReceiveWindow"`
-	MaxConnectionReceiveWindow  uint64        `mapstructure:"maxConnReceiveWindow"`
-	MaxIdleTimeout              time.Duration `mapstructure:"maxIdleTimeout"`
-	MaxIncomingStreams          int64         `mapstructure:"maxIncomingStreams"`
-	DisablePathMTUDiscovery     bool          `mapstructure:"disablePathMTUDiscovery"`
-}
-
-type serverConfigBandwidth struct {
-	Up   string `mapstructure:"up"`
-	Down string `mapstructure:"down"`
-}
-
-type serverConfigAuthHTTP struct {
-	URL      string `mapstructure:"url"`
-	Insecure bool   `mapstructure:"insecure"`
-}
-
-type serverConfigAuth struct {
-	Type     string               `mapstructure:"type"`
-	Password string               `mapstructure:"password"`
-	UserPass map[string]string    `mapstructure:"userpass"`
-	HTTP     serverConfigAuthHTTP `mapstructure:"http"`
-	Command  string               `mapstructure:"command"`
-}
-
-type serverConfigResolverTCP struct {
-	Addr    string        `mapstructure:"addr"`
-	Timeout time.Duration `mapstructure:"timeout"`
-}
-
-type serverConfigResolverUDP struct {
-	Addr    string        `mapstructure:"addr"`
-	Timeout time.Duration `mapstructure:"timeout"`
-}
-
-type serverConfigResolverTLS struct {
-	Addr     string        `mapstructure:"addr"`
-	Timeout  time.Duration `mapstructure:"timeout"`
-	SNI      string        `mapstructure:"sni"`
-	Insecure bool          `mapstructure:"insecure"`
-}
-
-type serverConfigResolverHTTPS struct {
-	Addr     string        `mapstructure:"addr"`
-	Timeout  time.Duration `mapstructure:"timeout"`
-	SNI      string        `mapstructure:"sni"`
-	Insecure bool          `mapstructure:"insecure"`
-}
-
-type serverConfigResolver struct {
-	Type  string                    `mapstructure:"type"`
-	TCP   serverConfigResolverTCP   `mapstructure:"tcp"`
-	UDP   serverConfigResolverUDP   `mapstructure:"udp"`
-	TLS   serverConfigResolverTLS   `mapstructure:"tls"`
-	HTTPS serverConfigResolverHTTPS `mapstructure:"https"`
-}
-
-type serverConfigACL struct {
-	File              string        `mapstructure:"file"`
-	Inline            []string      `mapstructure:"inline"`
-	GeoIP             string        `mapstructure:"geoip"`
-	GeoSite           string        `mapstructure:"geosite"`
-	GeoUpdateInterval time.Duration `mapstructure:"geoUpdateInterval"`
-}
-
-type serverConfigOutboundDirect struct {
-	Mode       string `mapstructure:"mode"`
-	BindIPv4   string `mapstructure:"bindIPv4"`
-	BindIPv6   string `mapstructure:"bindIPv6"`
-	BindDevice string `mapstructure:"bindDevice"`
-}
-
-type serverConfigOutboundSOCKS5 struct {
-	Addr     string `mapstructure:"addr"`
-	Username string `mapstructure:"username"`
-	Password string `mapstructure:"password"`
-}
-
-type serverConfigOutboundHTTP struct {
-	URL      string `mapstructure:"url"`
-	Insecure bool   `mapstructure:"insecure"`
-}
-
-type serverConfigOutboundEntry struct {
-	Name   string                     `mapstructure:"name"`
-	Type   string                     `mapstructure:"type"`
-	Direct serverConfigOutboundDirect `mapstructure:"direct"`
-	SOCKS5 serverConfigOutboundSOCKS5 `mapstructure:"socks5"`
-	HTTP   serverConfigOutboundHTTP   `mapstructure:"http"`
-}
-
-type serverConfigTrafficStats struct {
-	Listen string `mapstructure:"listen"`
-	Secret string `mapstructure:"secret"`
-}
-
-type serverConfigMasqueradeFile struct {
-	Dir string `mapstructure:"dir"`
-}
-
-type serverConfigMasqueradeProxy struct {
-	URL         string `mapstructure:"url"`
-	RewriteHost bool   `mapstructure:"rewriteHost"`
-}
-
-type serverConfigMasqueradeString struct {
-	Content    string            `mapstructure:"content"`
-	Headers    map[string]string `mapstructure:"headers"`
-	StatusCode int               `mapstructure:"statusCode"`
-}
-
-type serverConfigMasquerade struct {
-	Type        string                       `mapstructure:"type"`
-	File        serverConfigMasqueradeFile   `mapstructure:"file"`
-	Proxy       serverConfigMasqueradeProxy  `mapstructure:"proxy"`
-	String      serverConfigMasqueradeString `mapstructure:"string"`
-	ListenHTTP  string                       `mapstructure:"listenHTTP"`
-	ListenHTTPS string                       `mapstructure:"listenHTTPS"`
-	ForceHTTPS  bool                         `mapstructure:"forceHTTPS"`
-}
-
-func (c *serverConfig) fillConn(hyConfig *server.Config) error {
+func (c *serveConfig) fillConnS(hyConfig *server.Config) error {
 	listenAddr := c.Listen
 	if listenAddr == "" {
-		listenAddr = defaultListenAddr
+		listenAddr = defaultListenAdd
 	}
 	uAddr, err := net.ResolveUDPAddr("udp", listenAddr)
 	if err != nil {
@@ -225,8 +93,6 @@ func (c *serverConfig) fillConn(hyConfig *server.Config) error {
 	if err != nil {
 		return configError{Field: "listen", Err: err}
 	}
-	fmt.Println("type: %s", c.Obfs.Type)
-	fmt.Println("type: %s", c.Obfs.Salamander.Password)
 	switch strings.ToLower(c.Obfs.Type) {
 	case "", "plain":
 		hyConfig.Conn = conn
@@ -243,7 +109,7 @@ func (c *serverConfig) fillConn(hyConfig *server.Config) error {
 	}
 }
 
-func (c *serverConfig) fillTLSConfig(hyConfig *server.Config) error {
+func (c *serveConfig) fillTLSConfigS(hyConfig *server.Config) error {
 	if c.TLS == nil && c.ACME == nil {
 		return configError{Field: "tls", Err: errors.New("must set either tls or acme")}
 	}
@@ -292,7 +158,7 @@ func (c *serverConfig) fillTLSConfig(hyConfig *server.Config) error {
 			cmIssuer.CA = certmagic.LetsEncryptProductionCA
 		case "zerossl", "zero":
 			cmIssuer.CA = certmagic.ZeroSSLProductionCA
-			eab, err := genZeroSSLEAB(c.ACME.Email)
+			eab, err := genZeroSSLEABS(c.ACME.Email)
 			if err != nil {
 				return configError{Field: "acme.ca", Err: err}
 			}
@@ -321,7 +187,7 @@ func (c *serverConfig) fillTLSConfig(hyConfig *server.Config) error {
 	return nil
 }
 
-func genZeroSSLEAB(email string) (*acme.EAB, error) {
+func genZeroSSLEABS(email string) (*acme.EAB, error) {
 	req, err := http.NewRequest(
 		http.MethodPost,
 		"https://api.zerossl.com/acme/eab-credentials-email",
@@ -363,7 +229,7 @@ func genZeroSSLEAB(email string) (*acme.EAB, error) {
 	}, nil
 }
 
-func (c *serverConfig) fillQUICConfig(hyConfig *server.Config) error {
+func (c *serveConfig) fillQUICConfigS(hyConfig *server.Config) error {
 	hyConfig.QUICConfig = server.QUICConfig{
 		InitialStreamReceiveWindow:     c.QUIC.InitStreamReceiveWindow,
 		MaxStreamReceiveWindow:         c.QUIC.MaxStreamReceiveWindow,
@@ -376,7 +242,7 @@ func (c *serverConfig) fillQUICConfig(hyConfig *server.Config) error {
 	return nil
 }
 
-func serverConfigOutboundDirectToOutbound(c serverConfigOutboundDirect) (outbounds.PluggableOutbound, error) {
+func serveConfigOutboundDirectToOutbound(c serverConfigOutboundDirect) (outbounds.PluggableOutbound, error) {
 	var mode outbounds.DirectOutboundMode
 	switch strings.ToLower(c.Mode) {
 	case "", "auto":
@@ -413,21 +279,21 @@ func serverConfigOutboundDirectToOutbound(c serverConfigOutboundDirect) (outboun
 	return outbounds.NewDirectOutboundSimple(mode), nil
 }
 
-func serverConfigOutboundSOCKS5ToOutbound(c serverConfigOutboundSOCKS5) (outbounds.PluggableOutbound, error) {
+func serveConfigOutboundSOCKS5ToOutbound(c serverConfigOutboundSOCKS5) (outbounds.PluggableOutbound, error) {
 	if c.Addr == "" {
 		return nil, configError{Field: "outbounds.socks5.addr", Err: errors.New("empty socks5 address")}
 	}
 	return outbounds.NewSOCKS5Outbound(c.Addr, c.Username, c.Password), nil
 }
 
-func serverConfigOutboundHTTPToOutbound(c serverConfigOutboundHTTP) (outbounds.PluggableOutbound, error) {
+func serveConfigOutboundHTTPToOutbound(c serverConfigOutboundHTTP) (outbounds.PluggableOutbound, error) {
 	if c.URL == "" {
 		return nil, configError{Field: "outbounds.http.url", Err: errors.New("empty http address")}
 	}
 	return outbounds.NewHTTPOutbound(c.URL, c.Insecure)
 }
 
-func (c *serverConfig) fillOutboundConfig(hyConfig *server.Config) error {
+func (c *serveConfig) fillOutboundConfigS(hyConfig *server.Config) error {
 	// Resolver, ACL, actual outbound are all implemented through the Outbound interface.
 	// Depending on the config, we build a chain like this:
 	// Resolver(ACL(Outbounds...))
@@ -450,11 +316,11 @@ func (c *serverConfig) fillOutboundConfig(hyConfig *server.Config) error {
 			var err error
 			switch strings.ToLower(entry.Type) {
 			case "direct":
-				ob, err = serverConfigOutboundDirectToOutbound(entry.Direct)
+				ob, err = serveConfigOutboundDirectToOutbound(entry.Direct)
 			case "socks5":
-				ob, err = serverConfigOutboundSOCKS5ToOutbound(entry.SOCKS5)
+				ob, err = serveConfigOutboundSOCKS5ToOutbound(entry.SOCKS5)
 			case "http":
-				ob, err = serverConfigOutboundHTTPToOutbound(entry.HTTP)
+				ob, err = serveConfigOutboundHTTPToOutbound(entry.HTTP)
 			default:
 				err = configError{Field: "outbounds.type", Err: errors.New("unsupported outbound type")}
 			}
@@ -476,8 +342,8 @@ func (c *serverConfig) fillOutboundConfig(hyConfig *server.Config) error {
 		GeoIPFilename:   c.ACL.GeoIP,
 		GeoSiteFilename: c.ACL.GeoSite,
 		UpdateInterval:  c.ACL.GeoUpdateInterval,
-		DownloadFunc:    geoDownloadFunc,
-		DownloadErrFunc: geoDownloadErrFunc,
+		DownloadFunc:    geoDownloadFuncS,
+		DownloadErrFunc: geoDownloadErrFuncS,
 	}
 	if c.ACL.File != "" {
 		hasACL = true
@@ -531,16 +397,11 @@ func (c *serverConfig) fillOutboundConfig(hyConfig *server.Config) error {
 		return configError{Field: "resolver.type", Err: errors.New("unsupported resolver type")}
 	}
 
-	// Speed test
-	//if c.SpeedTest {
-	//	uOb = outbounds.NewSpeedtestHandler(uOb)
-	//}
-
 	hyConfig.Outbound = &outbounds.PluggableOutboundAdapter{PluggableOutbound: uOb}
 	return nil
 }
 
-func (c *serverConfig) fillBandwidthConfig(hyConfig *server.Config) error {
+func (c *serveConfig) fillBandwidthConfigS(hyConfig *server.Config) error {
 	var err error
 	if c.Bandwidth.Up != "" {
 		hyConfig.BandwidthConfig.MaxTx, err = utils.ConvBandwidth(c.Bandwidth.Up)
@@ -557,22 +418,22 @@ func (c *serverConfig) fillBandwidthConfig(hyConfig *server.Config) error {
 	return nil
 }
 
-func (c *serverConfig) fillIgnoreClientBandwidth(hyConfig *server.Config) error {
+func (c *serveConfig) fillIgnoreClientBandwidthS(hyConfig *server.Config) error {
 	hyConfig.IgnoreClientBandwidth = c.IgnoreClientBandwidth
 	return nil
 }
 
-func (c *serverConfig) fillDisableUDP(hyConfig *server.Config) error {
+func (c *serveConfig) fillDisableUDPS(hyConfig *server.Config) error {
 	hyConfig.DisableUDP = c.DisableUDP
 	return nil
 }
 
-func (c *serverConfig) fillUDPIdleTimeout(hyConfig *server.Config) error {
+func (c *serveConfig) fillUDPIdleTimeoutS(hyConfig *server.Config) error {
 	hyConfig.UDPIdleTimeout = c.UDPIdleTimeout
 	return nil
 }
 
-func (c *serverConfig) fillAuthenticator(hyConfig *server.Config) error {
+func (c *serveConfig) fillAuthenticatorS(hyConfig *server.Config) error {
 	if c.Auth.Type == "" {
 		return configError{Field: "auth.type", Err: errors.New("empty auth type")}
 	}
@@ -601,28 +462,47 @@ func (c *serverConfig) fillAuthenticator(hyConfig *server.Config) error {
 		}
 		hyConfig.Authenticator = &auth.CommandAuthenticator{Cmd: c.Auth.Command}
 		return nil
+	case "v2board":
+		// 定时获取用户列表并储存
+		// 判断URL是否存在
+		v2boardConfig := c.V2board
+		if v2boardConfig.ApiHost == "" || v2boardConfig.ApiKey == "" || v2boardConfig.NodeID == 0 {
+			return configError{Field: "auth.v2board", Err: errors.New("v2board config error")}
+		}
+		// 创建定时更新用户UUID协程
+		hyConfig.Authenticator = &auth.V2boardApiProvider{URL: fmt.Sprintf("%s?token=%s&node_id=%d&node_type=hysteria", c.V2board.ApiHost+v2board_uri_user, c.V2board.ApiKey, c.V2board.NodeID)}
+
+		return nil
+
 	default:
 		return configError{Field: "auth.type", Err: errors.New("unsupported auth type")}
 	}
 }
 
-func (c *serverConfig) fillEventLogger(hyConfig *server.Config) error {
-	hyConfig.EventLogger = &serverLogger{}
+func (c *serveConfig) fillEventLoggerS(hyConfig *server.Config) error {
+	hyConfig.EventLogger = &serveLogger{}
 	return nil
 }
 
-func (c *serverConfig) fillTrafficLogger(hyConfig *server.Config) error {
+func (c *serveConfig) fillTrafficLoggerS(hyConfig *server.Config) error {
 	if c.TrafficStats.Listen != "" {
 		tss := trafficlogger.NewTrafficStatsServer(c.TrafficStats.Secret)
 		hyConfig.TrafficLogger = tss
-		go runTrafficStatsServer(c.TrafficStats.Listen, tss)
+		// 添加定时更新用户使用流量协程
+		if c.V2board != nil && c.V2board.ApiHost != "" {
+			go auth.UpdateUsers(fmt.Sprintf("%s?token=%s&node_id=%d&node_type=hysteria", c.V2board.ApiHost+v2board_uri_user, c.V2board.ApiKey, c.V2board.NodeID), time.Second*5, hyConfig.TrafficLogger)
+			go hyConfig.TrafficLogger.PushTrafficToV2boardInterval(fmt.Sprintf("%s?token=%s&node_id=%d&node_type=hysteria", c.V2board.ApiHost+v2board_uri_push, c.V2board.ApiKey, c.V2board.NodeID), time.Second*60)
+		}
+		go runTrafficStatsServe(c.TrafficStats.Listen, tss)
+	} else {
+		go auth.UpdateUsers(fmt.Sprintf("%s?token=%s&node_id=%d&node_type=hysteria", c.V2board.ApiHost+v2board_uri_user, c.V2board.ApiKey, c.V2board.NodeID), time.Second*5, nil)
 	}
 	return nil
 }
 
 // fillMasqHandler must be called after fillConn, as we may need to extract the QUIC
 // port number from Conn for MasqTCPServer.
-func (c *serverConfig) fillMasqHandler(hyConfig *server.Config) error {
+func (c *serveConfig) fillMasqHandlerS(hyConfig *server.Config) error {
 	var handler http.Handler
 	switch strings.ToLower(c.Masquerade.Type) {
 	case "", "404":
@@ -679,43 +559,43 @@ func (c *serverConfig) fillMasqHandler(hyConfig *server.Config) error {
 	default:
 		return configError{Field: "masquerade.type", Err: errors.New("unsupported masquerade type")}
 	}
-	hyConfig.MasqHandler = &masqHandlerLogWrapper{H: handler, QUIC: true}
+	hyConfig.MasqHandler = &masqHandlerLogWrapperS{H: handler, QUIC: true}
 
 	if c.Masquerade.ListenHTTP != "" || c.Masquerade.ListenHTTPS != "" {
 		if c.Masquerade.ListenHTTP != "" && c.Masquerade.ListenHTTPS == "" {
 			return configError{Field: "masquerade.listenHTTPS", Err: errors.New("having only HTTP server without HTTPS is not supported")}
 		}
 		s := masq.MasqTCPServer{
-			QUICPort:  extractPortFromAddr(hyConfig.Conn.LocalAddr().String()),
-			HTTPSPort: extractPortFromAddr(c.Masquerade.ListenHTTPS),
-			Handler:   &masqHandlerLogWrapper{H: handler, QUIC: false},
+			QUICPort:  extractPortFromAdd(hyConfig.Conn.LocalAddr().String()),
+			HTTPSPort: extractPortFromAdd(c.Masquerade.ListenHTTPS),
+			Handler:   &masqHandlerLogWrapperS{H: handler, QUIC: false},
 			TLSConfig: &tls.Config{
 				Certificates:   hyConfig.TLSConfig.Certificates,
 				GetCertificate: hyConfig.TLSConfig.GetCertificate,
 			},
 			ForceHTTPS: c.Masquerade.ForceHTTPS,
 		}
-		go runMasqTCPServer(&s, c.Masquerade.ListenHTTP, c.Masquerade.ListenHTTPS)
+		go runMasqTCPServe(&s, c.Masquerade.ListenHTTP, c.Masquerade.ListenHTTPS)
 	}
 	return nil
 }
 
 // Config validates the fields and returns a ready-to-use Hysteria server config
-func (c *serverConfig) Config() (*server.Config, error) {
+func (c *serveConfig) ConfigS() (*server.Config, error) {
 	hyConfig := &server.Config{}
 	fillers := []func(*server.Config) error{
-		c.fillConn,
-		c.fillTLSConfig,
-		c.fillQUICConfig,
-		c.fillOutboundConfig,
-		c.fillBandwidthConfig,
-		c.fillIgnoreClientBandwidth,
-		c.fillDisableUDP,
-		c.fillUDPIdleTimeout,
-		c.fillAuthenticator,
-		c.fillEventLogger,
-		c.fillTrafficLogger,
-		c.fillMasqHandler,
+		c.fillConnS,
+		c.fillTLSConfigS,
+		c.fillQUICConfigS,
+		c.fillOutboundConfigS,
+		c.fillBandwidthConfigS,
+		c.fillIgnoreClientBandwidthS,
+		c.fillDisableUDPS,
+		c.fillUDPIdleTimeoutS,
+		c.fillAuthenticatorS,
+		c.fillEventLoggerS,
+		c.fillTrafficLoggerS,
+		c.fillMasqHandlerS,
 	}
 	for _, f := range fillers {
 		if err := f(hyConfig); err != nil {
@@ -726,17 +606,79 @@ func (c *serverConfig) Config() (*server.Config, error) {
 	return hyConfig, nil
 }
 
-func runServer(cmd *cobra.Command, args []string) {
-	logger.Info("server mode")
+type ResponseNodeInfo struct {
+	Host       string `json:"host"`
+	ServerPort uint   `json:"server_port"`
+	ServerName string `json:"server_name"`
+	UpMbps     uint   `json:"down_mbps"`
+	DownMbps   uint   `json:"up_mbps"`
+	Obfs       string `json:"obfs"`
+	BaseConfig struct {
+		PushInterval int `json:"push_interval"`
+		PullInterval int `json:"pull_interval"`
+	} `json:"base_config"`
+}
+
+func runServe(cmd *cobra.Command, args []string) {
+	logger.Info("panel mode")
 
 	if err := viper.ReadInConfig(); err != nil {
-		logger.Fatal("failed to read server config", zap.Error(err))
+		logger.Fatal("failed to read panel config", zap.Error(err))
 	}
-	var config serverConfig
+	var config serveConfig
 	if err := viper.Unmarshal(&config); err != nil {
-		logger.Fatal("failed to parse server config", zap.Error(err))
+		logger.Fatal("failed to parse panel config", zap.Error(err))
 	}
-	hyConfig, err := config.Config()
+
+	////////////////////////////////////////////////////////////////////////
+	// 如果配置了v2board 则自动获取监听端口、obfs
+	if config.V2board != nil && config.V2board.ApiHost != "" {
+		// 创建一个url.Values来存储查询参数
+		queryParams := url.Values{}
+		queryParams.Add("token", config.V2board.ApiKey)
+		queryParams.Add("node_id", strconv.Itoa(int(config.V2board.NodeID)))
+		queryParams.Add("node_type", "hysteria")
+
+		// 创建完整的URL，包括查询参数
+		nodeInfoUrl := config.V2board.ApiHost + v2board_uri_conf + "?" + queryParams.Encode()
+
+		// 发起 HTTP GET 请求
+		resp, err := http.Get(nodeInfoUrl)
+		if err != nil {
+			// 处理错误
+			fmt.Println("HTTP GET 请求出错:", err)
+			logger.Fatal("failed to client v2board api to get nodeInfo", zap.Error(err))
+		}
+		defer resp.Body.Close()
+		// 读取响应数据
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			logger.Fatal("failed to read v2board reaponse", zap.Error(err))
+		}
+		// 解析JSON数据
+		var responseNodeInfo ResponseNodeInfo
+		err = json.Unmarshal(body, &responseNodeInfo)
+		if err != nil {
+			logger.Fatal("failed to unmarshal v2board reaponse", zap.Error(err))
+		}
+		// 给 hy的端口、obfs、上行下行进行赋值
+		if responseNodeInfo.ServerPort != 0 {
+			config.Listen = ":" + strconv.Itoa(int(responseNodeInfo.ServerPort))
+		}
+		if responseNodeInfo.DownMbps != 0 {
+			config.Bandwidth.Down = strconv.Itoa(int(responseNodeInfo.DownMbps)) + "Mbps"
+		}
+		if responseNodeInfo.UpMbps != 0 {
+			config.Bandwidth.Up = strconv.Itoa(int(responseNodeInfo.UpMbps)) + "Mbps"
+		}
+		if responseNodeInfo.Obfs != "" {
+			config.Obfs.Type = "salamander"
+			config.Obfs.Salamander.Password = responseNodeInfo.Obfs
+		}
+	}
+	////////////////////////////////////////////////////////////////////////
+
+	hyConfig, err := config.ConfigS()
 	if err != nil {
 		logger.Fatal("failed to load server config", zap.Error(err))
 	}
@@ -748,7 +690,7 @@ func runServer(cmd *cobra.Command, args []string) {
 	if config.Listen != "" {
 		logger.Info("server up and running", zap.String("listen", config.Listen))
 	} else {
-		logger.Info("server up and running", zap.String("listen", defaultListenAddr))
+		logger.Info("server up and running", zap.String("listen", defaultListenAdd))
 	}
 
 	if !disableUpdateCheck {
@@ -760,14 +702,14 @@ func runServer(cmd *cobra.Command, args []string) {
 	}
 }
 
-func runTrafficStatsServer(listen string, handler http.Handler) {
+func runTrafficStatsServe(listen string, handler http.Handler) {
 	logger.Info("traffic stats server up and running", zap.String("listen", listen))
 	if err := correctnet.HTTPListenAndServe(listen, handler); err != nil {
 		logger.Fatal("failed to serve traffic stats", zap.Error(err))
 	}
 }
 
-func runMasqTCPServer(s *masq.MasqTCPServer, httpAddr, httpsAddr string) {
+func runMasqTCPServe(s *masq.MasqTCPServer, httpAddr, httpsAddr string) {
 	errChan := make(chan error, 2)
 	if httpAddr != "" {
 		go func() {
@@ -787,31 +729,31 @@ func runMasqTCPServer(s *masq.MasqTCPServer, httpAddr, httpsAddr string) {
 	}
 }
 
-func geoDownloadFunc(filename, url string) {
+func geoDownloadFuncS(filename, url string) {
 	logger.Info("downloading database", zap.String("filename", filename), zap.String("url", url))
 }
 
-func geoDownloadErrFunc(err error) {
+func geoDownloadErrFuncS(err error) {
 	if err != nil {
 		logger.Error("failed to download database", zap.Error(err))
 	}
 }
 
-type serverLogger struct{}
+type serveLogger struct{}
 
-func (l *serverLogger) Connect(addr net.Addr, id string, tx uint64) {
+func (l *serveLogger) Connect(addr net.Addr, id string, tx uint64) {
 	logger.Info("client connected", zap.String("addr", addr.String()), zap.String("id", id), zap.Uint64("tx", tx))
 }
 
-func (l *serverLogger) Disconnect(addr net.Addr, id string, err error) {
+func (l *serveLogger) Disconnect(addr net.Addr, id string, err error) {
 	logger.Info("client disconnected", zap.String("addr", addr.String()), zap.String("id", id), zap.Error(err))
 }
 
-func (l *serverLogger) TCPRequest(addr net.Addr, id, reqAddr string) {
+func (l *serveLogger) TCPRequest(addr net.Addr, id, reqAddr string) {
 	logger.Debug("TCP request", zap.String("addr", addr.String()), zap.String("id", id), zap.String("reqAddr", reqAddr))
 }
 
-func (l *serverLogger) TCPError(addr net.Addr, id, reqAddr string, err error) {
+func (l *serveLogger) TCPError(addr net.Addr, id, reqAddr string, err error) {
 	if err == nil {
 		logger.Debug("TCP closed", zap.String("addr", addr.String()), zap.String("id", id), zap.String("reqAddr", reqAddr))
 	} else {
@@ -819,11 +761,11 @@ func (l *serverLogger) TCPError(addr net.Addr, id, reqAddr string, err error) {
 	}
 }
 
-func (l *serverLogger) UDPRequest(addr net.Addr, id string, sessionID uint32, reqAddr string) {
+func (l *serveLogger) UDPRequest(addr net.Addr, id string, sessionID uint32, reqAddr string) {
 	logger.Debug("UDP request", zap.String("addr", addr.String()), zap.String("id", id), zap.Uint32("sessionID", sessionID), zap.String("reqAddr", reqAddr))
 }
 
-func (l *serverLogger) UDPError(addr net.Addr, id string, sessionID uint32, err error) {
+func (l *serveLogger) UDPError(addr net.Addr, id string, sessionID uint32, err error) {
 	if err == nil {
 		logger.Debug("UDP closed", zap.String("addr", addr.String()), zap.String("id", id), zap.Uint32("sessionID", sessionID))
 	} else {
@@ -831,12 +773,12 @@ func (l *serverLogger) UDPError(addr net.Addr, id string, sessionID uint32, err 
 	}
 }
 
-type masqHandlerLogWrapper struct {
+type masqHandlerLogWrapperS struct {
 	H    http.Handler
 	QUIC bool
 }
 
-func (m *masqHandlerLogWrapper) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (m *masqHandlerLogWrapperS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("masquerade request",
 		zap.String("addr", r.RemoteAddr),
 		zap.String("method", r.Method),
@@ -846,7 +788,7 @@ func (m *masqHandlerLogWrapper) ServeHTTP(w http.ResponseWriter, r *http.Request
 	m.H.ServeHTTP(w, r)
 }
 
-func extractPortFromAddr(addr string) int {
+func extractPortFromAdd(addr string) int {
 	_, portStr, err := net.SplitHostPort(addr)
 	if err != nil {
 		return 0
