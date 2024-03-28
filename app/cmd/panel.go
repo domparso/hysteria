@@ -6,7 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+	"github.com/apernet/hysteria/app/internal/utils"
+	"github.com/apernet/hysteria/extras/auth"
+	"github.com/apernet/hysteria/extras/masq"
+	"github.com/apernet/hysteria/extras/outbounds"
+	"github.com/apernet/hysteria/extras/trafficlogger"
+	"github.com/mholt/acmez/acme"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -15,27 +20,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/caddyserver/certmagic"
-	"github.com/mholt/acmez/acme"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
 
-	"github.com/apernet/hysteria/app/internal/utils"
 	"github.com/apernet/hysteria/core/server"
-	"github.com/apernet/hysteria/extras/auth"
 	"github.com/apernet/hysteria/extras/correctnet"
-	"github.com/apernet/hysteria/extras/masq"
 	"github.com/apernet/hysteria/extras/obfs"
-	"github.com/apernet/hysteria/extras/outbounds"
-	"github.com/apernet/hysteria/extras/trafficlogger"
-)
-
-const (
-	defaultListenAdd = ":443"
-	v2board_uri_user = "/api/v1/server/UniProxy/user"
-	v2board_uri_push = "/api/v1/server/UniProxy/push"
-	v2board_uri_conf = "/api/v1/server/UniProxy/config"
+	"github.com/caddyserver/certmagic"
 )
 
 var serveCmd = &cobra.Command{
@@ -48,8 +40,8 @@ func init() {
 	rootCmd.AddCommand(serveCmd)
 }
 
-type serveConfig struct {
-	V2board               *v2boardConfig              `mapstructure:"v2board"`
+type ServerConfig struct {
+	Panel                 *PanelConfig                `mapstructure:"panel"`
 	Listen                string                      `mapstructure:"listen"`
 	Obfs                  serverConfigObfs            `mapstructure:"obfs"`
 	TLS                   *serverConfigTLS            `mapstructure:"tls"`
@@ -67,11 +59,16 @@ type serveConfig struct {
 	Masquerade            serverConfigMasquerade      `mapstructure:"masquerade"`
 }
 
-type v2boardConfig struct {
-	ApiHost string `mapstructure:"apiHost"`
-	ApiKey  string `mapstructure:"apiKey"`
-	NodeID  uint   `mapstructure:"nodeID"`
-}
+const (
+	defaultListenAdd = ":443"
+	V2board_uri_user = "/api/v1/server/UniProxy/user"
+	V2board_uri_push = "/api/v1/server/UniProxy/push"
+	V2board_uri_conf = "/api/v1/server/UniProxy/config"
+
+	SSPanel_uri_user = "/api/v1/server/UniProxy/user"
+	SSPanel_uri_push = "/api/v1/server/UniProxy/push"
+	SSPanel_uri_conf = "/api/v1/server/UniProxy/config"
+)
 
 type PanelConfig struct {
 	Type    string `mapstructure:"type"`
@@ -80,7 +77,108 @@ type PanelConfig struct {
 	NodeID  uint   `mapstructure:"nodeID"`
 }
 
-func (c *serveConfig) fillConnS(hyConfig *server.Config) error {
+type V2boardConfig struct {
+	UserUrl   string `mapstructure:"userurl"`
+	PushUrl   string `mapstructure:"pushurl"`
+	ConfigUrl string `mapstructure:"configurl"`
+}
+
+type SSPanelConfig struct {
+	UserUrl   string `mapstructure:"userurl"`
+	PushUrl   string `mapstructure:"pushurl"`
+	ConfigUrl string `mapstructure:"configurl"`
+}
+
+type ResponseNodeInfo struct {
+	Host       string `json:"host"`
+	ServerPort uint   `json:"server_port"`
+	ServerName string `json:"server_name"`
+	UpMbps     uint   `json:"down_mbps"`
+	DownMbps   uint   `json:"up_mbps"`
+	Obfs       string `json:"obfs"`
+	BaseConfig struct {
+		PushInterval int `json:"push_interval"`
+		PullInterval int `json:"pull_interval"`
+	} `json:"base_config"`
+}
+
+type ServeLogger struct{}
+
+func ConfigError(field string, err error) error {
+	return configError{Field: field, Err: err}
+}
+
+func Logger(f string, msg string, fields ...zap.Field) {
+	if f == "debug" {
+		logger.Debug(msg, fields...)
+	} else if f == "info" {
+		logger.Info(msg, fields...)
+	} else if f == "warn" {
+		logger.Warn(msg, fields...)
+	} else if f == "error" {
+		logger.Error(msg, fields...)
+	} else if f == "fatal" {
+		logger.Fatal(msg, fields...)
+	} else {
+
+	}
+}
+
+func GetNodeInfo(config ServerConfig) {
+	if config.Panel != nil && config.Panel.ApiHost != "" {
+		// 创建一个url.Values来存储查询参数
+		queryParams := url.Values{}
+		queryParams.Add("token", config.Panel.ApiKey)
+		queryParams.Add("node_id", strconv.Itoa(int(config.Panel.NodeID)))
+		queryParams.Add("node_type", "hysteria")
+
+		if config.Panel.Type == "v2board" {
+			getV2boardConfig(queryParams, config)
+		} else if config.Panel.Type == "sspanel" {
+			getSSPanelConfig(queryParams, config)
+		}
+	}
+}
+
+func runServe(cmd *cobra.Command, args []string) {
+	logger.Info("panel mode")
+
+	if err := viper.ReadInConfig(); err != nil {
+		logger.Fatal("failed to read panel config", zap.Error(err))
+	}
+	var config ServerConfig
+	if err := viper.Unmarshal(&config); err != nil {
+		logger.Fatal("failed to parse panel config", zap.Error(err))
+	}
+
+	// 从面板获取节点新
+	GetNodeInfo(config)
+
+	hyConfig, err := config.ConfigS()
+	if err != nil {
+		logger.Fatal("failed to load server config", zap.Error(err))
+	}
+
+	s, err := server.NewServer(hyConfig)
+	if err != nil {
+		logger.Fatal("failed to initialize server", zap.Error(err))
+	}
+	if config.Listen != "" {
+		logger.Info("server up and running", zap.String("listen", config.Listen))
+	} else {
+		logger.Info("server up and running", zap.String("listen", defaultListenAdd))
+	}
+
+	if !disableUpdateCheck {
+		go runCheckUpdateServer()
+	}
+
+	if err := s.Serve(); err != nil {
+		logger.Fatal("failed to serve", zap.Error(err))
+	}
+}
+
+func (c *ServerConfig) fillConnS(hyConfig *server.Config) error {
 	listenAddr := c.Listen
 	if listenAddr == "" {
 		listenAddr = defaultListenAdd
@@ -109,7 +207,20 @@ func (c *serveConfig) fillConnS(hyConfig *server.Config) error {
 	}
 }
 
-func (c *serveConfig) fillTLSConfigS(hyConfig *server.Config) error {
+func (c *ServerConfig) fillQUICConfigS(hyConfig *server.Config) error {
+	hyConfig.QUICConfig = server.QUICConfig{
+		InitialStreamReceiveWindow:     c.QUIC.InitStreamReceiveWindow,
+		MaxStreamReceiveWindow:         c.QUIC.MaxStreamReceiveWindow,
+		InitialConnectionReceiveWindow: c.QUIC.InitConnectionReceiveWindow,
+		MaxConnectionReceiveWindow:     c.QUIC.MaxConnectionReceiveWindow,
+		MaxIdleTimeout:                 c.QUIC.MaxIdleTimeout,
+		MaxIncomingStreams:             c.QUIC.MaxIncomingStreams,
+		DisablePathMTUDiscovery:        c.QUIC.DisablePathMTUDiscovery,
+	}
+	return nil
+}
+
+func (c *ServerConfig) fillTLSConfigS(hyConfig *server.Config) error {
 	if c.TLS == nil && c.ACME == nil {
 		return configError{Field: "tls", Err: errors.New("must set either tls or acme")}
 	}
@@ -187,113 +298,7 @@ func (c *serveConfig) fillTLSConfigS(hyConfig *server.Config) error {
 	return nil
 }
 
-func genZeroSSLEABS(email string) (*acme.EAB, error) {
-	req, err := http.NewRequest(
-		http.MethodPost,
-		"https://api.zerossl.com/acme/eab-credentials-email",
-		strings.NewReader(url.Values{"email": []string{email}}.Encode()),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to creare ZeroSSL EAB request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("User-Agent", certmagic.UserAgent)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send ZeroSSL EAB request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	var result struct {
-		Success bool `json:"success"`
-		Error   struct {
-			Code int    `json:"code"`
-			Type string `json:"type"`
-		} `json:"error"`
-		EABKID     string `json:"eab_kid"`
-		EABHMACKey string `json:"eab_hmac_key"`
-	}
-	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("failed decoding ZeroSSL EAB API response: %w", err)
-	}
-	if result.Error.Code != 0 {
-		return nil, fmt.Errorf("failed getting ZeroSSL EAB credentials: HTTP %d: %s (code %d)", resp.StatusCode, result.Error.Type, result.Error.Code)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed getting EAB credentials: HTTP %d", resp.StatusCode)
-	}
-
-	return &acme.EAB{
-		KeyID:  result.EABKID,
-		MACKey: result.EABHMACKey,
-	}, nil
-}
-
-func (c *serveConfig) fillQUICConfigS(hyConfig *server.Config) error {
-	hyConfig.QUICConfig = server.QUICConfig{
-		InitialStreamReceiveWindow:     c.QUIC.InitStreamReceiveWindow,
-		MaxStreamReceiveWindow:         c.QUIC.MaxStreamReceiveWindow,
-		InitialConnectionReceiveWindow: c.QUIC.InitConnectionReceiveWindow,
-		MaxConnectionReceiveWindow:     c.QUIC.MaxConnectionReceiveWindow,
-		MaxIdleTimeout:                 c.QUIC.MaxIdleTimeout,
-		MaxIncomingStreams:             c.QUIC.MaxIncomingStreams,
-		DisablePathMTUDiscovery:        c.QUIC.DisablePathMTUDiscovery,
-	}
-	return nil
-}
-
-func serveConfigOutboundDirectToOutbound(c serverConfigOutboundDirect) (outbounds.PluggableOutbound, error) {
-	var mode outbounds.DirectOutboundMode
-	switch strings.ToLower(c.Mode) {
-	case "", "auto":
-		mode = outbounds.DirectOutboundModeAuto
-	case "64":
-		mode = outbounds.DirectOutboundMode64
-	case "46":
-		mode = outbounds.DirectOutboundMode46
-	case "6":
-		mode = outbounds.DirectOutboundMode6
-	case "4":
-		mode = outbounds.DirectOutboundMode4
-	default:
-		return nil, configError{Field: "outbounds.direct.mode", Err: errors.New("unsupported mode")}
-	}
-	bindIP := len(c.BindIPv4) > 0 || len(c.BindIPv6) > 0
-	bindDevice := len(c.BindDevice) > 0
-	if bindIP && bindDevice {
-		return nil, configError{Field: "outbounds.direct", Err: errors.New("cannot bind both IP and device")}
-	}
-	if bindIP {
-		ip4, ip6 := net.ParseIP(c.BindIPv4), net.ParseIP(c.BindIPv6)
-		if len(c.BindIPv4) > 0 && ip4 == nil {
-			return nil, configError{Field: "outbounds.direct.bindIPv4", Err: errors.New("invalid IPv4 address")}
-		}
-		if len(c.BindIPv6) > 0 && ip6 == nil {
-			return nil, configError{Field: "outbounds.direct.bindIPv6", Err: errors.New("invalid IPv6 address")}
-		}
-		return outbounds.NewDirectOutboundBindToIPs(mode, ip4, ip6)
-	}
-	if bindDevice {
-		return outbounds.NewDirectOutboundBindToDevice(mode, c.BindDevice)
-	}
-	return outbounds.NewDirectOutboundSimple(mode), nil
-}
-
-func serveConfigOutboundSOCKS5ToOutbound(c serverConfigOutboundSOCKS5) (outbounds.PluggableOutbound, error) {
-	if c.Addr == "" {
-		return nil, configError{Field: "outbounds.socks5.addr", Err: errors.New("empty socks5 address")}
-	}
-	return outbounds.NewSOCKS5Outbound(c.Addr, c.Username, c.Password), nil
-}
-
-func serveConfigOutboundHTTPToOutbound(c serverConfigOutboundHTTP) (outbounds.PluggableOutbound, error) {
-	if c.URL == "" {
-		return nil, configError{Field: "outbounds.http.url", Err: errors.New("empty http address")}
-	}
-	return outbounds.NewHTTPOutbound(c.URL, c.Insecure)
-}
-
-func (c *serveConfig) fillOutboundConfigS(hyConfig *server.Config) error {
+func (c *ServerConfig) fillOutboundConfigS(hyConfig *server.Config) error {
 	// Resolver, ACL, actual outbound are all implemented through the Outbound interface.
 	// Depending on the config, we build a chain like this:
 	// Resolver(ACL(Outbounds...))
@@ -401,7 +406,7 @@ func (c *serveConfig) fillOutboundConfigS(hyConfig *server.Config) error {
 	return nil
 }
 
-func (c *serveConfig) fillBandwidthConfigS(hyConfig *server.Config) error {
+func (c *ServerConfig) fillBandwidthConfigS(hyConfig *server.Config) error {
 	var err error
 	if c.Bandwidth.Up != "" {
 		hyConfig.BandwidthConfig.MaxTx, err = utils.ConvBandwidth(c.Bandwidth.Up)
@@ -418,22 +423,22 @@ func (c *serveConfig) fillBandwidthConfigS(hyConfig *server.Config) error {
 	return nil
 }
 
-func (c *serveConfig) fillIgnoreClientBandwidthS(hyConfig *server.Config) error {
+func (c *ServerConfig) fillIgnoreClientBandwidthS(hyConfig *server.Config) error {
 	hyConfig.IgnoreClientBandwidth = c.IgnoreClientBandwidth
 	return nil
 }
 
-func (c *serveConfig) fillDisableUDPS(hyConfig *server.Config) error {
+func (c *ServerConfig) fillDisableUDPS(hyConfig *server.Config) error {
 	hyConfig.DisableUDP = c.DisableUDP
 	return nil
 }
 
-func (c *serveConfig) fillUDPIdleTimeoutS(hyConfig *server.Config) error {
+func (c *ServerConfig) fillUDPIdleTimeoutS(hyConfig *server.Config) error {
 	hyConfig.UDPIdleTimeout = c.UDPIdleTimeout
 	return nil
 }
 
-func (c *serveConfig) fillAuthenticatorS(hyConfig *server.Config) error {
+func (c *ServerConfig) fillAuthenticatorS(hyConfig *server.Config) error {
 	if c.Auth.Type == "" {
 		return configError{Field: "auth.type", Err: errors.New("empty auth type")}
 	}
@@ -462,16 +467,20 @@ func (c *serveConfig) fillAuthenticatorS(hyConfig *server.Config) error {
 		}
 		hyConfig.Authenticator = &auth.CommandAuthenticator{Cmd: c.Auth.Command}
 		return nil
-	case "v2board":
+	case "panel":
 		// 定时获取用户列表并储存
 		// 判断URL是否存在
-		v2boardConfig := c.V2board
-		if v2boardConfig.ApiHost == "" || v2boardConfig.ApiKey == "" || v2boardConfig.NodeID == 0 {
+		panelConfig := c.Panel
+		if panelConfig.ApiHost == "" || panelConfig.ApiKey == "" || panelConfig.NodeID == 0 {
 			return configError{Field: "auth.v2board", Err: errors.New("v2board config error")}
 		}
-		// 创建定时更新用户UUID协程
-		hyConfig.Authenticator = &auth.V2boardApiProvider{URL: fmt.Sprintf("%s?token=%s&node_id=%d&node_type=hysteria", c.V2board.ApiHost+v2board_uri_user, c.V2board.ApiKey, c.V2board.NodeID)}
-
+		if panelConfig.Type == "v2board" {
+			hyConfig.Authenticator = GetV2boardApiProvider(c)
+		} else if panelConfig.Type == "sspanel" {
+			hyConfig.Authenticator = GetSSPanelApiProvider(c)
+		} else {
+			return configError{Field: "auth.panel", Err: errors.New("panel type error")}
+		}
 		return nil
 
 	default:
@@ -479,30 +488,40 @@ func (c *serveConfig) fillAuthenticatorS(hyConfig *server.Config) error {
 	}
 }
 
-func (c *serveConfig) fillEventLoggerS(hyConfig *server.Config) error {
-	hyConfig.EventLogger = &serveLogger{}
+func (c *ServerConfig) fillEventLoggerS(hyConfig *server.Config) error {
+	hyConfig.EventLogger = &ServeLogger{}
 	return nil
 }
 
-func (c *serveConfig) fillTrafficLoggerS(hyConfig *server.Config) error {
+func (c *ServerConfig) fillTrafficLoggerS(hyConfig *server.Config) error {
 	if c.TrafficStats.Listen != "" {
 		tss := trafficlogger.NewTrafficStatsServer(c.TrafficStats.Secret)
 		hyConfig.TrafficLogger = tss
+
 		// 添加定时更新用户使用流量协程
-		if c.V2board != nil && c.V2board.ApiHost != "" {
-			go auth.UpdateUsers(fmt.Sprintf("%s?token=%s&node_id=%d&node_type=hysteria", c.V2board.ApiHost+v2board_uri_user, c.V2board.ApiKey, c.V2board.NodeID), time.Second*5, hyConfig.TrafficLogger)
-			go hyConfig.TrafficLogger.PushTrafficToV2boardInterval(fmt.Sprintf("%s?token=%s&node_id=%d&node_type=hysteria", c.V2board.ApiHost+v2board_uri_push, c.V2board.ApiKey, c.V2board.NodeID), time.Second*60)
+		if c.Panel != nil && c.Panel.ApiHost != "" {
+			if c.Panel.Type == "v2board" {
+				go UpdateV2boardUsers(time.Second*5, hyConfig.TrafficLogger)
+				go hyConfig.TrafficLogger.PushTrafficToV2boardInterval(V2bConfig.PushUrl, time.Second*60)
+
+			} else if c.Panel.Type == "sspanel" {
+
+			}
 		}
 		go runTrafficStatsServe(c.TrafficStats.Listen, tss)
 	} else {
-		go auth.UpdateUsers(fmt.Sprintf("%s?token=%s&node_id=%d&node_type=hysteria", c.V2board.ApiHost+v2board_uri_user, c.V2board.ApiKey, c.V2board.NodeID), time.Second*5, nil)
+		if c.Panel.Type == "v2board" {
+			go UpdateV2boardUsers(time.Second*5, nil)
+		} else if c.Panel.Type == "sspanel" {
+			go UpdateSSPanelUsers(time.Second*5, nil)
+		}
 	}
 	return nil
 }
 
 // fillMasqHandler must be called after fillConn, as we may need to extract the QUIC
 // port number from Conn for MasqTCPServer.
-func (c *serveConfig) fillMasqHandlerS(hyConfig *server.Config) error {
+func (c *ServerConfig) fillMasqHandlerS(hyConfig *server.Config) error {
 	var handler http.Handler
 	switch strings.ToLower(c.Masquerade.Type) {
 	case "", "404":
@@ -581,7 +600,7 @@ func (c *serveConfig) fillMasqHandlerS(hyConfig *server.Config) error {
 }
 
 // Config validates the fields and returns a ready-to-use Hysteria server config
-func (c *serveConfig) ConfigS() (*server.Config, error) {
+func (c *ServerConfig) ConfigS() (*server.Config, error) {
 	hyConfig := &server.Config{}
 	fillers := []func(*server.Config) error{
 		c.fillConnS,
@@ -606,100 +625,97 @@ func (c *serveConfig) ConfigS() (*server.Config, error) {
 	return hyConfig, nil
 }
 
-type ResponseNodeInfo struct {
-	Host       string `json:"host"`
-	ServerPort uint   `json:"server_port"`
-	ServerName string `json:"server_name"`
-	UpMbps     uint   `json:"down_mbps"`
-	DownMbps   uint   `json:"up_mbps"`
-	Obfs       string `json:"obfs"`
-	BaseConfig struct {
-		PushInterval int `json:"push_interval"`
-		PullInterval int `json:"pull_interval"`
-	} `json:"base_config"`
+func serveConfigOutboundDirectToOutbound(c serverConfigOutboundDirect) (outbounds.PluggableOutbound, error) {
+	var mode outbounds.DirectOutboundMode
+	switch strings.ToLower(c.Mode) {
+	case "", "auto":
+		mode = outbounds.DirectOutboundModeAuto
+	case "64":
+		mode = outbounds.DirectOutboundMode64
+	case "46":
+		mode = outbounds.DirectOutboundMode46
+	case "6":
+		mode = outbounds.DirectOutboundMode6
+	case "4":
+		mode = outbounds.DirectOutboundMode4
+	default:
+		return nil, configError{Field: "outbounds.direct.mode", Err: errors.New("unsupported mode")}
+	}
+	bindIP := len(c.BindIPv4) > 0 || len(c.BindIPv6) > 0
+	bindDevice := len(c.BindDevice) > 0
+	if bindIP && bindDevice {
+		return nil, configError{Field: "outbounds.direct", Err: errors.New("cannot bind both IP and device")}
+	}
+	if bindIP {
+		ip4, ip6 := net.ParseIP(c.BindIPv4), net.ParseIP(c.BindIPv6)
+		if len(c.BindIPv4) > 0 && ip4 == nil {
+			return nil, configError{Field: "outbounds.direct.bindIPv4", Err: errors.New("invalid IPv4 address")}
+		}
+		if len(c.BindIPv6) > 0 && ip6 == nil {
+			return nil, configError{Field: "outbounds.direct.bindIPv6", Err: errors.New("invalid IPv6 address")}
+		}
+		return outbounds.NewDirectOutboundBindToIPs(mode, ip4, ip6)
+	}
+	if bindDevice {
+		return outbounds.NewDirectOutboundBindToDevice(mode, c.BindDevice)
+	}
+	return outbounds.NewDirectOutboundSimple(mode), nil
 }
 
-func runServe(cmd *cobra.Command, args []string) {
-	logger.Info("panel mode")
-
-	if err := viper.ReadInConfig(); err != nil {
-		logger.Fatal("failed to read panel config", zap.Error(err))
+func serveConfigOutboundSOCKS5ToOutbound(c serverConfigOutboundSOCKS5) (outbounds.PluggableOutbound, error) {
+	if c.Addr == "" {
+		return nil, configError{Field: "outbounds.socks5.addr", Err: errors.New("empty socks5 address")}
 	}
-	var config serveConfig
-	if err := viper.Unmarshal(&config); err != nil {
-		logger.Fatal("failed to parse panel config", zap.Error(err))
+	return outbounds.NewSOCKS5Outbound(c.Addr, c.Username, c.Password), nil
+}
+
+func serveConfigOutboundHTTPToOutbound(c serverConfigOutboundHTTP) (outbounds.PluggableOutbound, error) {
+	if c.URL == "" {
+		return nil, configError{Field: "outbounds.http.url", Err: errors.New("empty http address")}
 	}
+	return outbounds.NewHTTPOutbound(c.URL, c.Insecure)
+}
 
-	////////////////////////////////////////////////////////////////////////
-	// 如果配置了v2board 则自动获取监听端口、obfs
-	if config.V2board != nil && config.V2board.ApiHost != "" {
-		// 创建一个url.Values来存储查询参数
-		queryParams := url.Values{}
-		queryParams.Add("token", config.V2board.ApiKey)
-		queryParams.Add("node_id", strconv.Itoa(int(config.V2board.NodeID)))
-		queryParams.Add("node_type", "hysteria")
-
-		// 创建完整的URL，包括查询参数
-		nodeInfoUrl := config.V2board.ApiHost + v2board_uri_conf + "?" + queryParams.Encode()
-
-		// 发起 HTTP GET 请求
-		resp, err := http.Get(nodeInfoUrl)
-		if err != nil {
-			// 处理错误
-			fmt.Println("HTTP GET 请求出错:", err)
-			logger.Fatal("failed to client v2board api to get nodeInfo", zap.Error(err))
-		}
-		defer resp.Body.Close()
-		// 读取响应数据
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			logger.Fatal("failed to read v2board reaponse", zap.Error(err))
-		}
-		// 解析JSON数据
-		var responseNodeInfo ResponseNodeInfo
-		err = json.Unmarshal(body, &responseNodeInfo)
-		if err != nil {
-			logger.Fatal("failed to unmarshal v2board reaponse", zap.Error(err))
-		}
-		// 给 hy的端口、obfs、上行下行进行赋值
-		if responseNodeInfo.ServerPort != 0 {
-			config.Listen = ":" + strconv.Itoa(int(responseNodeInfo.ServerPort))
-		}
-		if responseNodeInfo.DownMbps != 0 {
-			config.Bandwidth.Down = strconv.Itoa(int(responseNodeInfo.DownMbps)) + "Mbps"
-		}
-		if responseNodeInfo.UpMbps != 0 {
-			config.Bandwidth.Up = strconv.Itoa(int(responseNodeInfo.UpMbps)) + "Mbps"
-		}
-		if responseNodeInfo.Obfs != "" {
-			config.Obfs.Type = "salamander"
-			config.Obfs.Salamander.Password = responseNodeInfo.Obfs
-		}
-	}
-	////////////////////////////////////////////////////////////////////////
-
-	hyConfig, err := config.ConfigS()
+func genZeroSSLEABS(email string) (*acme.EAB, error) {
+	req, err := http.NewRequest(
+		http.MethodPost,
+		"https://api.zerossl.com/acme/eab-credentials-email",
+		strings.NewReader(url.Values{"email": []string{email}}.Encode()),
+	)
 	if err != nil {
-		logger.Fatal("failed to load server config", zap.Error(err))
+		return nil, fmt.Errorf("failed to creare ZeroSSL EAB request: %w", err)
 	}
-
-	s, err := server.NewServer(hyConfig)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", certmagic.UserAgent)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		logger.Fatal("failed to initialize server", zap.Error(err))
+		return nil, fmt.Errorf("failed to send ZeroSSL EAB request: %w", err)
 	}
-	if config.Listen != "" {
-		logger.Info("server up and running", zap.String("listen", config.Listen))
-	} else {
-		logger.Info("server up and running", zap.String("listen", defaultListenAdd))
+	defer func() { _ = resp.Body.Close() }()
+
+	var result struct {
+		Success bool `json:"success"`
+		Error   struct {
+			Code int    `json:"code"`
+			Type string `json:"type"`
+		} `json:"error"`
+		EABKID     string `json:"eab_kid"`
+		EABHMACKey string `json:"eab_hmac_key"`
+	}
+	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed decoding ZeroSSL EAB API response: %w", err)
+	}
+	if result.Error.Code != 0 {
+		return nil, fmt.Errorf("failed getting ZeroSSL EAB credentials: HTTP %d: %s (code %d)", resp.StatusCode, result.Error.Type, result.Error.Code)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed getting EAB credentials: HTTP %d", resp.StatusCode)
 	}
 
-	if !disableUpdateCheck {
-		go runCheckUpdateServer()
-	}
-
-	if err := s.Serve(); err != nil {
-		logger.Fatal("failed to serve", zap.Error(err))
-	}
+	return &acme.EAB{
+		KeyID:  result.EABKID,
+		MACKey: result.EABHMACKey,
+	}, nil
 }
 
 func runTrafficStatsServe(listen string, handler http.Handler) {
@@ -737,65 +753,4 @@ func geoDownloadErrFuncS(err error) {
 	if err != nil {
 		logger.Error("failed to download database", zap.Error(err))
 	}
-}
-
-type serveLogger struct{}
-
-func (l *serveLogger) Connect(addr net.Addr, id string, tx uint64) {
-	logger.Info("client connected", zap.String("addr", addr.String()), zap.String("id", id), zap.Uint64("tx", tx))
-}
-
-func (l *serveLogger) Disconnect(addr net.Addr, id string, err error) {
-	logger.Info("client disconnected", zap.String("addr", addr.String()), zap.String("id", id), zap.Error(err))
-}
-
-func (l *serveLogger) TCPRequest(addr net.Addr, id, reqAddr string) {
-	logger.Debug("TCP request", zap.String("addr", addr.String()), zap.String("id", id), zap.String("reqAddr", reqAddr))
-}
-
-func (l *serveLogger) TCPError(addr net.Addr, id, reqAddr string, err error) {
-	if err == nil {
-		logger.Debug("TCP closed", zap.String("addr", addr.String()), zap.String("id", id), zap.String("reqAddr", reqAddr))
-	} else {
-		logger.Error("TCP error", zap.String("addr", addr.String()), zap.String("id", id), zap.String("reqAddr", reqAddr), zap.Error(err))
-	}
-}
-
-func (l *serveLogger) UDPRequest(addr net.Addr, id string, sessionID uint32, reqAddr string) {
-	logger.Debug("UDP request", zap.String("addr", addr.String()), zap.String("id", id), zap.Uint32("sessionID", sessionID), zap.String("reqAddr", reqAddr))
-}
-
-func (l *serveLogger) UDPError(addr net.Addr, id string, sessionID uint32, err error) {
-	if err == nil {
-		logger.Debug("UDP closed", zap.String("addr", addr.String()), zap.String("id", id), zap.Uint32("sessionID", sessionID))
-	} else {
-		logger.Error("UDP error", zap.String("addr", addr.String()), zap.String("id", id), zap.Uint32("sessionID", sessionID), zap.Error(err))
-	}
-}
-
-type masqHandlerLogWrapperS struct {
-	H    http.Handler
-	QUIC bool
-}
-
-func (m *masqHandlerLogWrapperS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	logger.Debug("masquerade request",
-		zap.String("addr", r.RemoteAddr),
-		zap.String("method", r.Method),
-		zap.String("host", r.Host),
-		zap.String("url", r.URL.String()),
-		zap.Bool("quic", m.QUIC))
-	m.H.ServeHTTP(w, r)
-}
-
-func extractPortFromAdd(addr string) int {
-	_, portStr, err := net.SplitHostPort(addr)
-	if err != nil {
-		return 0
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		return 0
-	}
-	return port
 }
