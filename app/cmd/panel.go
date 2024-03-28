@@ -133,7 +133,7 @@ func GetNodeInfo(config ServerConfig) {
 		queryParams.Add("node_type", "hysteria")
 
 		if config.Panel.Type == "v2board" {
-			getV2boardConfig(queryParams, config)
+			getV2boardConfig(config)
 		} else if config.Panel.Type == "sspanel" {
 			getSSPanelConfig(queryParams, config)
 		}

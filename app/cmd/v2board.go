@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"strconv"
 	"sync"
 	"time"
@@ -17,14 +16,14 @@ import (
 
 var V2bConfig V2boardConfig
 
-func getV2boardConfig(params url.Values, config ServerConfig) {
+func getV2boardConfig(config ServerConfig) {
 
 	V2bConfig.UserUrl = fmt.Sprintf("%s?token=%s&node_id=%d&node_type=hysteria", config.Panel.ApiHost+V2board_uri_user, config.Panel.ApiKey, config.Panel.NodeID)
 	V2bConfig.PushUrl = fmt.Sprintf("%s?token=%s&node_id=%d&node_type=hysteria", config.Panel.ApiHost+V2board_uri_push, config.Panel.ApiKey, config.Panel.NodeID)
 	V2bConfig.ConfigUrl = fmt.Sprintf("%s?token=%s&node_id=%d&node_type=hysteria", config.Panel.ApiHost+V2board_uri_conf, config.Panel.ApiKey, config.Panel.NodeID)
 
 	// 发起 HTTP GET 请求
-	resp, err := http.Get(V2bConfig.ConfigUrl + "?" + params.Encode())
+	resp, err := http.Get(V2bConfig.ConfigUrl)
 	if err != nil {
 		// 处理错误
 		fmt.Println("HTTP GET 请求出错:", err)
