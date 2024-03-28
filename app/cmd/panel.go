@@ -104,10 +104,6 @@ type ResponseNodeInfo struct {
 
 type ServeLogger struct{}
 
-func ConfigError(field string, err error) error {
-	return configError{Field: field, Err: err}
-}
-
 func Logger(f string, msg string, fields ...zap.Field) {
 	if f == "debug" {
 		logger.Debug(msg, fields...)
@@ -124,7 +120,7 @@ func Logger(f string, msg string, fields ...zap.Field) {
 	}
 }
 
-func GetNodeInfo(config ServerConfig) {
+func GetNodeInfo(config *ServerConfig) {
 	if config.Panel != nil && config.Panel.ApiHost != "" {
 		// 创建一个url.Values来存储查询参数
 		queryParams := url.Values{}
@@ -146,8 +142,8 @@ func runServe(cmd *cobra.Command, args []string) {
 	if err := viper.ReadInConfig(); err != nil {
 		logger.Fatal("failed to read panel config", zap.Error(err))
 	}
-	var config ServerConfig
-	if err := viper.Unmarshal(&config); err != nil {
+	config := new(ServerConfig)
+	if err := viper.Unmarshal(config); err != nil {
 		logger.Fatal("failed to parse panel config", zap.Error(err))
 	}
 
@@ -176,6 +172,32 @@ func runServe(cmd *cobra.Command, args []string) {
 	if err := s.Serve(); err != nil {
 		logger.Fatal("failed to serve", zap.Error(err))
 	}
+}
+
+// Config validates the fields and returns a ready-to-use Hysteria server config
+func (c *ServerConfig) ConfigS() (*server.Config, error) {
+	hyConfig := &server.Config{}
+	fillers := []func(*server.Config) error{
+		c.fillConnS,
+		c.fillTLSConfigS,
+		c.fillQUICConfigS,
+		c.fillOutboundConfigS,
+		c.fillBandwidthConfigS,
+		c.fillIgnoreClientBandwidthS,
+		c.fillDisableUDPS,
+		c.fillUDPIdleTimeoutS,
+		c.fillAuthenticatorS,
+		c.fillEventLoggerS,
+		c.fillTrafficLoggerS,
+		c.fillMasqHandlerS,
+	}
+	for _, f := range fillers {
+		if err := f(hyConfig); err != nil {
+			return nil, err
+		}
+	}
+
+	return hyConfig, nil
 }
 
 func (c *ServerConfig) fillConnS(hyConfig *server.Config) error {
@@ -597,32 +619,6 @@ func (c *ServerConfig) fillMasqHandlerS(hyConfig *server.Config) error {
 		go runMasqTCPServe(&s, c.Masquerade.ListenHTTP, c.Masquerade.ListenHTTPS)
 	}
 	return nil
-}
-
-// Config validates the fields and returns a ready-to-use Hysteria server config
-func (c *ServerConfig) ConfigS() (*server.Config, error) {
-	hyConfig := &server.Config{}
-	fillers := []func(*server.Config) error{
-		c.fillConnS,
-		c.fillTLSConfigS,
-		c.fillQUICConfigS,
-		c.fillOutboundConfigS,
-		c.fillBandwidthConfigS,
-		c.fillIgnoreClientBandwidthS,
-		c.fillDisableUDPS,
-		c.fillUDPIdleTimeoutS,
-		c.fillAuthenticatorS,
-		c.fillEventLoggerS,
-		c.fillTrafficLoggerS,
-		c.fillMasqHandlerS,
-	}
-	for _, f := range fillers {
-		if err := f(hyConfig); err != nil {
-			return nil, err
-		}
-	}
-
-	return hyConfig, nil
 }
 
 func serveConfigOutboundDirectToOutbound(c serverConfigOutboundDirect) (outbounds.PluggableOutbound, error) {

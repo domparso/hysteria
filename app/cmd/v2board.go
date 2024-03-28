@@ -16,13 +16,20 @@ import (
 
 var V2bConfig V2boardConfig
 
-func getV2boardConfig(config ServerConfig) {
-
+func getV2boardConfig(config *ServerConfig) *ServerConfig {
 	V2bConfig.UserUrl = fmt.Sprintf("%s?token=%s&node_id=%d&node_type=hysteria", config.Panel.ApiHost+V2board_uri_user, config.Panel.ApiKey, config.Panel.NodeID)
 	V2bConfig.PushUrl = fmt.Sprintf("%s?token=%s&node_id=%d&node_type=hysteria", config.Panel.ApiHost+V2board_uri_push, config.Panel.ApiKey, config.Panel.NodeID)
 	V2bConfig.ConfigUrl = fmt.Sprintf("%s?token=%s&node_id=%d&node_type=hysteria", config.Panel.ApiHost+V2board_uri_conf, config.Panel.ApiKey, config.Panel.NodeID)
 
 	// 发起 HTTP GET 请求
+	//proxy, err := url.Parse("http://127.0.0.1:10809")
+	//client := http.Client{
+	//	Transport: &http.Transport{
+	//		// 设置代理
+	//		Proxy: http.ProxyURL(proxy),
+	//	},
+	//}
+
 	resp, err := http.Get(V2bConfig.ConfigUrl)
 	if err != nil {
 		// 处理错误
@@ -56,6 +63,7 @@ func getV2boardConfig(config ServerConfig) {
 		config.Obfs.Salamander.Password = responseNodeInfo.Obfs
 	}
 
+	return config
 }
 
 func GetV2boardApiProvider(config *ServerConfig) server.Authenticator {

@@ -8,7 +8,7 @@ import (
 
 var sspanelConfig SSPanelConfig
 
-func getSSPanelConfig(param map[string][]string, config ServerConfig) {
+func getSSPanelConfig(param map[string][]string, config *ServerConfig) {
 	sspanelConfig.UserUrl = fmt.Sprintf("%s?token=%s&node_id=%d&node_type=hysteria", config.Panel.ApiHost+V2board_uri_user, config.Panel.ApiKey, config.Panel.NodeID)
 }
 
