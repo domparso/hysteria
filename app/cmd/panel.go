@@ -65,9 +65,9 @@ const (
 	V2board_uri_push = "/api/v1/server/UniProxy/push"
 	V2board_uri_conf = "/api/v1/server/UniProxy/config"
 
-	SSPanel_uri_user = "/api/v1/server/UniProxy/user"
+	SSPanel_uri_user = "/users"
 	SSPanel_uri_push = "/api/v1/server/UniProxy/push"
-	SSPanel_uri_conf = "/api/v1/server/UniProxy/config"
+	SSPanel_uri_conf = "/mod_mu/nodes/%s/info"
 )
 
 type PanelConfig struct {
@@ -87,19 +87,6 @@ type SSPanelConfig struct {
 	UserUrl   string `mapstructure:"userurl"`
 	PushUrl   string `mapstructure:"pushurl"`
 	ConfigUrl string `mapstructure:"configurl"`
-}
-
-type ResponseNodeInfo struct {
-	Host       string `json:"host"`
-	ServerPort uint   `json:"server_port"`
-	ServerName string `json:"server_name"`
-	UpMbps     uint   `json:"down_mbps"`
-	DownMbps   uint   `json:"up_mbps"`
-	Obfs       string `json:"obfs"`
-	BaseConfig struct {
-		PushInterval int `json:"push_interval"`
-		PullInterval int `json:"pull_interval"`
-	} `json:"base_config"`
 }
 
 type ServeLogger struct{}
@@ -131,7 +118,7 @@ func GetNodeInfo(config *ServerConfig) {
 		if config.Panel.Type == "v2board" {
 			getV2boardConfig(config)
 		} else if config.Panel.Type == "sspanel" {
-			getSSPanelConfig(queryParams, config)
+			getSSPanelConfig(config)
 		}
 	}
 }

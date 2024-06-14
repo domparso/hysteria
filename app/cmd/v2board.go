@@ -16,10 +16,36 @@ import (
 
 var V2bConfig V2boardConfig
 
-func getV2boardConfig(config *ServerConfig) *ServerConfig {
-	V2bConfig.UserUrl = fmt.Sprintf("%s?token=%s&node_id=%d&node_type=hysteria", config.Panel.ApiHost+V2board_uri_user, config.Panel.ApiKey, config.Panel.NodeID)
-	V2bConfig.PushUrl = fmt.Sprintf("%s?token=%s&node_id=%d&node_type=hysteria", config.Panel.ApiHost+V2board_uri_push, config.Panel.ApiKey, config.Panel.NodeID)
-	V2bConfig.ConfigUrl = fmt.Sprintf("%s?token=%s&node_id=%d&node_type=hysteria", config.Panel.ApiHost+V2board_uri_conf, config.Panel.ApiKey, config.Panel.NodeID)
+type ResponseV2board struct {
+	Host       string `json:"host"`
+	ServerPort uint   `json:"server_port"`
+	ServerName string `json:"server_name"`
+	UpMbps     uint   `json:"down_mbps"`
+	DownMbps   uint   `json:"up_mbps"`
+	Obfs       string `json:"obfs"`
+	BaseConfig struct {
+		PushInterval int `json:"push_interval"`
+		PullInterval int `json:"pull_interval"`
+	} `json:"base_config"`
+}
+
+func getV2boardConfig(config *ServerConfig) {
+	V2bConfig.UserUrl = fmt.Sprintf(
+		"%s?token=%s&node_id=%d&node_type=hysteria",
+		config.Panel.ApiHost+V2board_uri_user,
+		config.Panel.ApiKey,
+		config.Panel.NodeID)
+
+	V2bConfig.PushUrl = fmt.Sprintf(
+		"%s?token=%s&node_id=%d&node_type=hysteria",
+		config.Panel.ApiHost+V2board_uri_push,
+		config.Panel.ApiKey,
+		config.Panel.NodeID)
+	V2bConfig.ConfigUrl = fmt.Sprintf(
+		"%s?token=%s&node_id=%d&node_type=hysteria",
+		config.Panel.ApiHost+V2board_uri_conf,
+		config.Panel.ApiKey,
+		config.Panel.NodeID)
 
 	// 发起 HTTP GET 请求
 	//proxy, err := url.Parse("http://127.0.0.1:10809")
@@ -43,7 +69,7 @@ func getV2boardConfig(config *ServerConfig) *ServerConfig {
 		Logger("fatal", "failed to read v2board reaponse", zap.Error(err))
 	}
 	// 解析JSON数据
-	var responseNodeInfo ResponseNodeInfo
+	var responseNodeInfo ResponseV2board
 	err = json.Unmarshal(body, &responseNodeInfo)
 	if err != nil {
 		Logger("fatal", "failed to unmarshal v2board reaponse", zap.Error(err))
@@ -62,8 +88,6 @@ func getV2boardConfig(config *ServerConfig) *ServerConfig {
 		config.Obfs.Type = "salamander"
 		config.Obfs.Salamander.Password = responseNodeInfo.Obfs
 	}
-
-	return config
 }
 
 func GetV2boardApiProvider(config *ServerConfig) server.Authenticator {
