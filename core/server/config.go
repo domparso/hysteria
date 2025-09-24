@@ -2,12 +2,16 @@ package server
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"time"
 
-	"github.com/apernet/hysteria/core/errors"
-	"github.com/apernet/hysteria/core/internal/pmtud"
+	"github.com/apernet/hysteria/core/v2/errors"
+	"github.com/apernet/hysteria/core/v2/internal/pmtud"
+	"github.com/apernet/hysteria/core/v2/internal/utils"
+	"github.com/apernet/quic-go"
 )
 
 const (
@@ -22,6 +26,7 @@ type Config struct {
 	TLSConfig             TLSConfig
 	QUICConfig            QUICConfig
 	Conn                  net.PacketConn
+	RequestHook           RequestHook
 	Outbound              Outbound
 	BandwidthConfig       BandwidthConfig
 	IgnoreClientBandwidth bool
@@ -97,6 +102,7 @@ func (c *Config) fill() error {
 type TLSConfig struct {
 	Certificates   []tls.Certificate
 	GetCertificate func(info *tls.ClientHelloInfo) (*tls.Certificate, error)
+	ClientCAs      *x509.CertPool
 }
 
 // QUICConfig contains the QUIC configuration fields that we want to expose to the user.
@@ -108,6 +114,19 @@ type QUICConfig struct {
 	MaxIdleTimeout                 time.Duration
 	MaxIncomingStreams             int64
 	DisablePathMTUDiscovery        bool // The server may still override this to true on unsupported platforms.
+}
+
+// RequestHook allows filtering and modifying requests before the server connects to the remote.
+// A request will only be hooked if Check returns true.
+// The returned byte slice, if not empty, will be sent to the remote before proxying - this is
+// mainly for "putting back" the content read from the client for sniffing, etc.
+// Return a non-nil error to abort the connection.
+// Note that due to the current architectural limitations, it can only inspect the first packet
+// of a UDP connection. It also cannot put back any data as the first packet is always sent as-is.
+type RequestHook interface {
+	Check(isUDP bool, reqAddr string) bool
+	TCP(stream quic.Stream, reqAddr *string) ([]byte, error)
+	UDP(data []byte, reqAddr *string) error
 }
 
 // Outbound provides the implementation of how the server should connect to remote servers.
@@ -201,4 +220,69 @@ type TrafficLogger interface {
 	PushTrafficToV2boardInterval(url string, interval time.Duration)
 	NewKick(id string) (ok bool)
 	//////////////////////////////////////////////////////////////////////////
+
+	LogTraffic(id string, tx, rx uint64) (ok bool)
+	LogOnlineState(id string, online bool)
+	TraceStream(stream quic.Stream, stats *StreamStats)
+	UntraceStream(stream quic.Stream)
+}
+
+type StreamState int
+
+const (
+	// StreamStateInitial indicates the initial state of a stream.
+	// Client has opened the stream, but we have not received the proxy request yet.
+	StreamStateInitial StreamState = iota
+
+	// StreamStateHooking indicates that the hook (usually sniff) is processing.
+	// Client has sent the proxy request, but sniff requires more data to complete.
+	StreamStateHooking
+
+	// StreamStateConnecting indicates that we are connecting to the proxy target.
+	StreamStateConnecting
+
+	// StreamStateEstablished indicates the proxy is established.
+	StreamStateEstablished
+
+	// StreamStateClosed indicates the stream is closed.
+	StreamStateClosed
+)
+
+func (s StreamState) String() string {
+	switch s {
+	case StreamStateInitial:
+		return "init"
+	case StreamStateHooking:
+		return "hook"
+	case StreamStateConnecting:
+		return "connect"
+	case StreamStateEstablished:
+		return "estab"
+	case StreamStateClosed:
+		return "closed"
+	default:
+		return "unknown"
+	}
+}
+
+type StreamStats struct {
+	State utils.Atomic[StreamState]
+
+	AuthID      string
+	ConnID      uint32
+	InitialTime time.Time
+
+	ReqAddr       utils.Atomic[string]
+	HookedReqAddr utils.Atomic[string]
+
+	Tx atomic.Uint64
+	Rx atomic.Uint64
+
+	LastActiveTime utils.Atomic[time.Time]
+}
+
+func (s *StreamStats) setHookedReqAddr(addr string) {
+	if addr != s.ReqAddr.Load() {
+		s.HookedReqAddr.Store(addr)
+	}
 }

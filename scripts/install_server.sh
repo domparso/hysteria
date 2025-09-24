@@ -60,6 +60,9 @@ HYSTERIA_USER="${HYSTERIA_USER:-}"
 # Directory for ACME certificates storage
 HYSTERIA_HOME_DIR="${HYSTERIA_HOME_DIR:-}"
 
+# SELinux context of systemd unit files
+SECONTEXT_SYSTEMD_UNIT="${SECONTEXT_SYSTEMD_UNIT:-}"
+
 
 ###
 # ARGUMENTS
@@ -176,6 +179,59 @@ systemctl() {
   command systemctl "$@"
 }
 
+chcon() {
+  if ! has_command chcon || [[ "x$FORCE_NO_SELINUX" == "x1" ]]; then
+    return
+  fi
+
+  command chcon "$@"
+}
+
+get_systemd_version() {
+  if ! has_command systemctl; then
+    return
+  fi
+
+  command systemctl --version | head -1 | cut -d ' ' -f 2
+}
+
+systemd_unit_working_directory() {
+  local _systemd_version="$(get_systemd_version || true)"
+
+  # WorkingDirectory=~ requires systemd v227 or later.
+  # (released on Oct 2015, only CentOS 7 use an earlier version)
+  # ref: systemd/systemd@5f5d8eab1f2f5f5e088bc301533b3e4636de96c7
+  if [[ -n "$_systemd_version" && "$_systemd_version" -lt "227" ]]; then
+    echo "$HYSTERIA_HOME_DIR"
+    return
+  fi
+
+  echo "~"
+}
+
+get_selinux_context() {
+  local _file="$1"
+
+  local _lsres="$(ls -dZ "$_file" | head -1)"
+  local _sectx=''
+  case "$(echo "$_lsres" | wc -w)" in
+    2)
+      _sectx="$(echo "$_lsres" | cut -d ' ' -f 1)"
+      ;;
+    5)
+      _sectx="$(echo "$_lsres" | cut -d ' ' -f 4)"
+      ;;
+    *)
+      ;;
+  esac
+
+  if [[ "x$_sectx" == "x?" ]]; then
+    _sectx=""
+  fi
+
+  echo "$_sectx"
+}
+
 show_argument_error_and_exit() {
   local _error_msg="$1"
 
@@ -221,6 +277,7 @@ exec_sudo() {
     $(env | grep "^OPERATING_SYSTEM=" || true)
     $(env | grep "^ARCHITECTURE=" || true)
     $(env | grep "^HYSTERIA_\w*=" || true)
+    $(env | grep "^SECONTEXT_SYSTEMD_UNIT=" || true)
     $(env | grep "^FORCE_\w*=" || true)
   )
   IFS="$_saved_ifs"
@@ -236,6 +293,7 @@ detect_package_manager() {
   fi
 
   if has_command apt; then
+    apt update
     PACKAGE_MANAGEMENT_INSTALL='apt -y --no-install-recommends install'
     return 0
   fi
@@ -378,6 +436,9 @@ check_environment_architecture() {
     's390x')
       ARCHITECTURE='s390x'
       ;;
+    'loongarch64')
+      ARCHITECTURE='loong64'
+      ;;
     *)
       error "The architecture '$(uname -a)' is not supported."
       note "Specify ARCHITECTURE=<architecture> to bypass this check and force this script to run on this $(uname -m)."
@@ -406,6 +467,30 @@ check_environment_systemd() {
   esac
 }
 
+check_environment_selinux() {
+  if ! has_command getenforce; then
+    return
+  fi
+
+  note "SELinux is detected"
+
+  if [[ "x$FORCE_NO_SELINUX" == "x1" ]]; then
+    warning "FORCE_NO_SELINUX=1, we will skip all SELinux related commands."
+    return
+  fi
+
+  if [[ -z "$SECONTEXT_SYSTEMD_UNIT" ]]; then
+    if [[ -z "$FORCE_NO_SYSTEMD" ]] && [[ -e "$SYSTEMD_SERVICES_DIR" ]]; then
+      local _sectx="$(get_selinux_context "$SYSTEMD_SERVICES_DIR")"
+      if [[ -z "$_sectx" ]]; then
+        warning "Failed to obtain SEContext of $SYSTEMD_SERVICES_DIR"
+      else
+        SECONTEXT_SYSTEMD_UNIT="$_sectx"
+      fi
+    fi
+  fi
+}
+
 check_environment_curl() {
   if has_command curl; then
     return
@@ -426,6 +511,7 @@ check_environment() {
   check_environment_operating_system
   check_environment_architecture
   check_environment_systemd
+  check_environment_selinux
   check_environment_curl
   check_environment_grep
 }
@@ -677,7 +763,7 @@ After=network.target
 [Service]
 Type=simple
 ExecStart=$EXECUTABLE_INSTALL_PATH server --config ${CONFIG_DIR}/${_config_name}.yaml
-WorkingDirectory=~
+WorkingDirectory=$(systemd_unit_working_directory)
 User=$HYSTERIA_USER
 Group=$HYSTERIA_USER
 Environment=HYSTERIA_LOG_LEVEL=info
@@ -789,7 +875,7 @@ is_hysteria1_version() {
 get_installed_version() {
   if is_hysteria_installed; then
     if "$EXECUTABLE_INSTALL_PATH" version > /dev/null 2>&1; then
-      "$EXECUTABLE_INSTALL_PATH" version | grep Version | grep -o 'v[.0-9]*'
+      "$EXECUTABLE_INSTALL_PATH" version | grep '^Version' | grep -o 'v[.0-9]*'
     elif "$EXECUTABLE_INSTALL_PATH" -v > /dev/null 2>&1; then
       # hysteria 1
       "$EXECUTABLE_INSTALL_PATH" -v | cut -d ' ' -f 3
@@ -917,6 +1003,10 @@ perform_install_hysteria_systemd() {
 
   install_content -Dm644 "$(tpl_hysteria_server_service)" "$SYSTEMD_SERVICES_DIR/hysteria-server.service" "1"
   install_content -Dm644 "$(tpl_hysteria_server_x_service)" "$SYSTEMD_SERVICES_DIR/hysteria-server@.service" "1"
+  if [[ -n "$SECONTEXT_SYSTEMD_UNIT" ]]; then
+    chcon "$SECONTEXT_SYSTEMD_UNIT" "$SYSTEMD_SERVICES_DIR/hysteria-server.service"
+    chcon "$SECONTEXT_SYSTEMD_UNIT" "$SYSTEMD_SERVICES_DIR/hysteria-server@.service"
+  fi
 
   systemctl daemon-reload
 }
@@ -958,22 +1048,26 @@ perform_install() {
     _is_update_required=1
   fi
 
-  if [[ -z "$_is_update_required" ]]; then
-    echo "$(tgreen)Installed version is up-to-date, there is nothing to do.$(treset)"
-    return
-  fi
-
   if is_hysteria1_version "$VERSION"; then
     error "This script can only install Hysteria 2."
     exit 95
   fi
 
-  perform_install_hysteria_binary
+  if [[ -n "$_is_update_required" ]]; then
+    perform_install_hysteria_binary
+  fi
+
+  # Always install additional files, regardless of $_is_update_required.
+  # This allows changes to be made with environment variables (e.g. change HYSTERIA_USER without --force).
   perform_install_hysteria_example_config
   perform_install_hysteria_home_legacy
   perform_install_hysteria_systemd
 
-  if [[ -n "$_is_frash_install" ]]; then
+  if [[ -z "$_is_update_required" ]]; then
+    echo
+    echo "$(tgreen)Installed version is up-to-date, there is nothing to do.$(treset)"
+    echo
+  elif [[ -n "$_is_frash_install" ]]; then
     echo
     echo -e "$(tbold)Congratulation! Hysteria 2 has been successfully installed on your server.$(treset)"
     echo

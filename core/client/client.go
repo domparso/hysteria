@@ -3,15 +3,16 @@ package client
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"net"
 	"net/http"
 	"net/url"
 	"time"
 
-	coreErrs "github.com/apernet/hysteria/core/errors"
-	"github.com/apernet/hysteria/core/internal/congestion"
-	"github.com/apernet/hysteria/core/internal/protocol"
-	"github.com/apernet/hysteria/core/internal/utils"
+	coreErrs "github.com/apernet/hysteria/core/v2/errors"
+	"github.com/apernet/hysteria/core/v2/internal/congestion"
+	"github.com/apernet/hysteria/core/v2/internal/protocol"
+	"github.com/apernet/hysteria/core/v2/internal/utils"
 
 	"github.com/apernet/quic-go"
 	"github.com/apernet/quic-go/http3"
@@ -73,6 +74,7 @@ func (c *clientImpl) connect() (*HandshakeInfo, error) {
 		InsecureSkipVerify:    c.config.TLSConfig.InsecureSkipVerify,
 		VerifyPeerCertificate: c.config.TLSConfig.VerifyPeerCertificate,
 		RootCAs:               c.config.TLSConfig.RootCAs,
+		GetClientCertificate:  c.config.TLSConfig.GetClientCertificate,
 	}
 	quicConfig := &quic.Config{
 		InitialStreamReceiveWindow:     c.config.QUICConfig.InitialStreamReceiveWindow,
@@ -83,13 +85,13 @@ func (c *clientImpl) connect() (*HandshakeInfo, error) {
 		KeepAlivePeriod:                c.config.QUICConfig.KeepAlivePeriod,
 		DisablePathMTUDiscovery:        c.config.QUICConfig.DisablePathMTUDiscovery,
 		EnableDatagrams:                true,
+		DisablePathManager:             true,
 	}
 	// Prepare RoundTripper
 	var conn quic.EarlyConnection
 	rt := &http3.RoundTripper{
-		EnableDatagrams: true,
 		TLSClientConfig: tlsConfig,
-		QuicConfig:      quicConfig,
+		QUICConfig:      quicConfig,
 		Dial: func(ctx context.Context, _ string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
 			qc, err := quic.DialEarly(ctx, pktConn, c.config.ServerAddr, tlsCfg, cfg)
 			if err != nil {
@@ -222,18 +224,21 @@ func (c *clientImpl) Close() error {
 	return nil
 }
 
+var nonPermanentErrors = []error{
+	quic.StreamLimitReachedError{},
+}
+
 // wrapIfConnectionClosed checks if the error returned by quic-go
-// indicates that the QUIC connection has been permanently closed,
-// and if so, wraps the error with coreErrs.ClosedError.
-// PITFALL: sometimes quic-go has "internal errors" that are not net.Error,
-// but we still need to treat them as ClosedError.
+// is recoverable (listed in nonPermanentErrors) or permanent.
+// Recoverable errors are returned as-is,
+// permanent ones are wrapped as ClosedError.
 func wrapIfConnectionClosed(err error) error {
-	netErr, ok := err.(net.Error)
-	if !ok || !netErr.Temporary() {
-		return coreErrs.ClosedError{Err: err}
-	} else {
-		return err
+	for _, e := range nonPermanentErrors {
+		if errors.Is(err, e) {
+			return err
+		}
 	}
+	return coreErrs.ClosedError{Err: err}
 }
 
 type tcpConn struct {

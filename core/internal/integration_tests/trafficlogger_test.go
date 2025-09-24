@@ -2,15 +2,16 @@ package integration_tests
 
 import (
 	"io"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 
-	"github.com/apernet/hysteria/core/client"
-	"github.com/apernet/hysteria/core/internal/integration_tests/mocks"
-	"github.com/apernet/hysteria/core/server"
+	"github.com/apernet/hysteria/core/v2/client"
+	"github.com/apernet/hysteria/core/v2/internal/integration_tests/mocks"
+	"github.com/apernet/hysteria/core/v2/server"
 )
 
 // TestClientServerTrafficLoggerTCP tests that the traffic logger is correctly called for TCP connections,
@@ -35,6 +36,7 @@ func TestClientServerTrafficLoggerTCP(t *testing.T) {
 	go s.Serve()
 
 	// Create client
+	trafficLogger.EXPECT().LogOnlineState("nobody", true).Return().Once()
 	c, _, err := client.NewClient(&client.Config{
 		ServerAddr: udpAddr,
 		TLSConfig:  client.TLSConfig{InsecureSkipVerify: true},
@@ -46,6 +48,7 @@ func TestClientServerTrafficLoggerTCP(t *testing.T) {
 
 	sobConn := mocks.NewMockConn(t)
 	sobConnCh := make(chan []byte, 1)
+	sobConnChCloseFunc := sync.OnceFunc(func() { close(sobConnCh) })
 	sobConn.EXPECT().Read(mock.Anything).RunAndReturn(func(bs []byte) (int, error) {
 		b := <-sobConnCh
 		if b == nil {
@@ -55,16 +58,17 @@ func TestClientServerTrafficLoggerTCP(t *testing.T) {
 		}
 	})
 	sobConn.EXPECT().Close().RunAndReturn(func() error {
-		close(sobConnCh)
+		sobConnChCloseFunc()
 		return nil
-	}).Once()
+	})
 	serverOb.EXPECT().TCP(addr).Return(sobConn, nil).Once()
+	trafficLogger.EXPECT().TraceStream(mock.Anything, mock.Anything).Return().Once()
 
 	conn, err := c.TCP(addr)
 	assert.NoError(t, err)
 
 	// Client reads from server
-	trafficLogger.EXPECT().Log("nobody", uint64(0), uint64(11)).Return(true).Once()
+	trafficLogger.EXPECT().LogTraffic("nobody", uint64(0), uint64(11)).Return(true).Once()
 	sobConnCh <- []byte("knock knock")
 	buf := make([]byte, 100)
 	n, err := conn.Read(buf)
@@ -73,7 +77,7 @@ func TestClientServerTrafficLoggerTCP(t *testing.T) {
 	assert.Equal(t, "knock knock", string(buf[:n]))
 
 	// Client writes to server
-	trafficLogger.EXPECT().Log("nobody", uint64(12), uint64(0)).Return(true).Once()
+	trafficLogger.EXPECT().LogTraffic("nobody", uint64(12), uint64(0)).Return(true).Once()
 	sobConn.EXPECT().Write([]byte("who is there")).Return(12, nil).Once()
 	n, err = conn.Write([]byte("who is there"))
 	assert.NoError(t, err)
@@ -81,7 +85,9 @@ func TestClientServerTrafficLoggerTCP(t *testing.T) {
 	time.Sleep(1 * time.Second) // Need some time for the server to receive the data
 
 	// Client reads from server again but blocked
-	trafficLogger.EXPECT().Log("nobody", uint64(0), uint64(4)).Return(false).Once()
+	trafficLogger.EXPECT().UntraceStream(mock.Anything).Return().Once()
+	trafficLogger.EXPECT().LogTraffic("nobody", uint64(0), uint64(4)).Return(false).Once()
+	trafficLogger.EXPECT().LogOnlineState("nobody", false).Return().Once()
 	sobConnCh <- []byte("nope")
 	n, err = conn.Read(buf)
 	assert.Zero(t, n)
@@ -114,6 +120,7 @@ func TestClientServerTrafficLoggerUDP(t *testing.T) {
 	go s.Serve()
 
 	// Create client
+	trafficLogger.EXPECT().LogOnlineState("nobody", true).Return().Once()
 	c, _, err := client.NewClient(&client.Config{
 		ServerAddr: udpAddr,
 		TLSConfig:  client.TLSConfig{InsecureSkipVerify: true},
@@ -125,6 +132,7 @@ func TestClientServerTrafficLoggerUDP(t *testing.T) {
 
 	sobConn := mocks.NewMockUDPConn(t)
 	sobConnCh := make(chan []byte, 1)
+	sobConnChCloseFunc := sync.OnceFunc(func() { close(sobConnCh) })
 	sobConn.EXPECT().ReadFrom(mock.Anything).RunAndReturn(func(bs []byte) (int, string, error) {
 		b := <-sobConnCh
 		if b == nil {
@@ -134,23 +142,23 @@ func TestClientServerTrafficLoggerUDP(t *testing.T) {
 		}
 	})
 	sobConn.EXPECT().Close().RunAndReturn(func() error {
-		close(sobConnCh)
+		sobConnChCloseFunc()
 		return nil
-	}).Once()
+	})
 	serverOb.EXPECT().UDP(addr).Return(sobConn, nil).Once()
 
 	conn, err := c.UDP()
 	assert.NoError(t, err)
 
 	// Client writes to server
-	trafficLogger.EXPECT().Log("nobody", uint64(9), uint64(0)).Return(true).Once()
+	trafficLogger.EXPECT().LogTraffic("nobody", uint64(9), uint64(0)).Return(true).Once()
 	sobConn.EXPECT().WriteTo([]byte("small sad"), addr).Return(9, nil).Once()
 	err = conn.Send([]byte("small sad"), addr)
 	assert.NoError(t, err)
 	time.Sleep(1 * time.Second) // Need some time for the server to receive the data
 
 	// Client reads from server
-	trafficLogger.EXPECT().Log("nobody", uint64(0), uint64(7)).Return(true).Once()
+	trafficLogger.EXPECT().LogTraffic("nobody", uint64(0), uint64(7)).Return(true).Once()
 	sobConnCh <- []byte("big mad")
 	bs, rAddr, err := conn.Receive()
 	assert.NoError(t, err)
@@ -158,7 +166,8 @@ func TestClientServerTrafficLoggerUDP(t *testing.T) {
 	assert.Equal(t, "big mad", string(bs))
 
 	// Client reads from server again but blocked
-	trafficLogger.EXPECT().Log("nobody", uint64(0), uint64(4)).Return(false).Once()
+	trafficLogger.EXPECT().LogTraffic("nobody", uint64(0), uint64(4)).Return(false).Once()
+	trafficLogger.EXPECT().LogOnlineState("nobody", false).Return().Once()
 	sobConnCh <- []byte("nope")
 	bs, rAddr, err = conn.Receive()
 	assert.Equal(t, err, io.EOF)

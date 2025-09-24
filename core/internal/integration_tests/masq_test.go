@@ -12,9 +12,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 
-	"github.com/apernet/hysteria/core/internal/integration_tests/mocks"
-	"github.com/apernet/hysteria/core/internal/protocol"
-	"github.com/apernet/hysteria/core/server"
+	"github.com/apernet/hysteria/core/v2/internal/integration_tests/mocks"
+	"github.com/apernet/hysteria/core/v2/internal/protocol"
+	"github.com/apernet/hysteria/core/v2/server"
 
 	"github.com/apernet/quic-go"
 	"github.com/apernet/quic-go/http3"
@@ -41,7 +41,6 @@ func TestServerMasquerade(t *testing.T) {
 	// QUIC connection & RoundTripper
 	var conn quic.EarlyConnection
 	rt := &http3.RoundTripper{
-		EnableDatagrams: true,
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: true,
 		},

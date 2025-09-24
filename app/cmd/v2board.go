@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/apernet/hysteria/core/server"
+	"github.com/apernet/hysteria/core/v2/server"
 )
 
 var V2bConfig V2boardConfig

@@ -3,7 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/apernet/hysteria/core/server"
+	"github.com/apernet/hysteria/core/v2/server"
 	"go.uber.org/zap"
 	"io"
 	"net/http"
