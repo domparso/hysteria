@@ -29,7 +29,7 @@ BUILD_DIR = "build"
 CORE_SRC_DIR = "./core"
 EXTRAS_SRC_DIR = "./extras"
 APP_SRC_DIR = "./app"
-APP_SRC_CMD_PKG = "github.com/apernet/hysteria/app/cmd"
+APP_SRC_CMD_PKG = "github.com/apernet/hysteria/app/v2/cmd"
 
 MODULE_SRC_DIRS = [CORE_SRC_DIR, EXTRAS_SRC_DIR, APP_SRC_DIR]
 
@@ -73,6 +73,9 @@ ARCH_ALIASES = {
     "amd64-avx": {
         "GOARCH": "amd64",
         "GOAMD64": "v3",
+    },
+    "loong64": {
+        "GOARCH": "loong64",
     },
 }
 
@@ -145,10 +148,31 @@ def get_app_commit():
     return app_commit
 
 
+def get_toolchain():
+    try:
+        output = subprocess.check_output(["go", "version"]).decode().strip()
+        if output.startswith("go version "):
+            output = output[11:]
+        return output
+    except Exception:
+        return "Unknown"
+
+
 def get_current_os_arch():
     d_os = subprocess.check_output(["go", "env", "GOOS"]).decode().strip()
     d_arch = subprocess.check_output(["go", "env", "GOARCH"]).decode().strip()
     return (d_os, d_arch)
+
+
+def get_lib_version():
+    try:
+        with open(CORE_SRC_DIR + "/go.mod") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("github.com/apernet/quic-go"):
+                    return line.split(" ")[1].strip()
+    except Exception:
+        return "Unknown"
 
 
 def get_app_platforms():
@@ -169,15 +193,19 @@ def get_app_platforms():
     return result
 
 
-def cmd_build(pprof=False, release=False, race=False):
+def cmd_build(pprof=False, release=False, race=False, linux=False):
     if not check_build_env():
         return
 
     os.makedirs(BUILD_DIR, exist_ok=True)
 
     app_version = get_app_version()
-    app_date = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    app_date = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    app_toolchain = get_toolchain()
     app_commit = get_app_commit()
+    lib_version = get_lib_version()
 
     ldflags = [
         "-X",
@@ -190,21 +218,32 @@ def cmd_build(pprof=False, release=False, race=False):
         + ("release" if release else "dev")
         + ("-pprof" if pprof else ""),
         "-X",
+        '"' + APP_SRC_CMD_PKG + ".appToolchain=" + app_toolchain + '"',
+        "-X",
         APP_SRC_CMD_PKG + ".appCommit=" + app_commit,
+        "-X",
+        APP_SRC_CMD_PKG + ".libVersion=" + lib_version,
     ]
     if release:
         ldflags.append("-s")
         ldflags.append("-w")
 
     for os_name, arch in get_app_platforms():
-        print("Building for %s/%s..." % (os_name, arch))
-
-        out_name = "hysteria-%s-%s" % (os_name, arch)
-        if os_name == "windows":
-            out_name += ".exe"
-
         env = os.environ.copy()
-        env["GOOS"] = os_name
+        if linux:
+            print("Building for %s/%s..." % ("linux", arch))
+            out_name = "hysteria-%s-%s" % ("linux", arch)
+
+            env["GOOS"] = "linux"
+        else:
+            print("Building for %s/%s..." % (os_name, arch))
+
+            out_name = "hysteria-%s-%s" % (os_name, arch)
+            if os_name == "windows":
+                out_name += ".exe"
+
+            env["GOOS"] = os_name
+
         if arch in ARCH_ALIASES:
             for k, v in ARCH_ALIASES[arch].items():
                 env[k] = v
@@ -254,6 +293,7 @@ def cmd_build(pprof=False, release=False, race=False):
         cmd.append(APP_SRC_DIR)
 
         try:
+            print("cmd", cmd)
             subprocess.check_call(cmd, env=env)
         except Exception:
             print("Failed to build for %s/%s" % (os_name, arch))
@@ -267,8 +307,12 @@ def cmd_run(args, pprof=False, race=False):
         return
 
     app_version = get_app_version()
-    app_date = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    app_date = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    app_toolchain = get_toolchain()
     app_commit = get_app_commit()
+    lib_version = get_lib_version()
 
     current_os, current_arch = get_current_os_arch()
 
@@ -280,11 +324,15 @@ def cmd_run(args, pprof=False, race=False):
         "-X",
         APP_SRC_CMD_PKG + ".appType=dev-run",
         "-X",
+        '"' + APP_SRC_CMD_PKG + ".appToolchain=" + app_toolchain + '"',
+        "-X",
         APP_SRC_CMD_PKG + ".appCommit=" + app_commit,
         "-X",
         APP_SRC_CMD_PKG + ".appPlatform=" + current_os,
         "-X",
         APP_SRC_CMD_PKG + ".appArch=" + current_arch,
+        "-X",
+        APP_SRC_CMD_PKG + ".libVersion=" + lib_version,
     ]
 
     cmd = ["go", "run", "-ldflags", " ".join(ldflags)]
@@ -456,6 +504,9 @@ def main():
     p_build.add_argument(
         "-d", "--race", action="store_true", help="Build with data race detection"
     )
+    p_build.add_argument(
+        "-l", "--linux", action="store_true", help="linux"
+    )
 
     # Format
     p_cmd.add_parser("format", help="Format the code")
@@ -490,7 +541,7 @@ def main():
     if args.command == "run":
         cmd_run(args.args, args.pprof, args.race)
     elif args.command == "build":
-        cmd_build(args.pprof, args.release, args.race)
+        cmd_build(args.pprof, args.release, args.race, args.linux)
     elif args.command == "format":
         cmd_format()
     elif args.command == "mockgen":
