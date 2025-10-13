@@ -30,5 +30,6 @@ acl:
 
 ### 安装
 ```bash
-    https://raw.githubusercontent.com/domparso/hysteria/panel/scripts/h2.sh
+    wget -N https://raw.githubusercontent.com/domparso/hysteria/panel/scripts/h2.sh && bash h2.sh -i
+
 ```
